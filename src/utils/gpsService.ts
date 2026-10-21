@@ -1,0 +1,217 @@
+/**
+ * Real Production GPS Tracking Service using Browser Geolocation API
+ * Handles high-accuracy coordinate acquisition, noise filtering,
+ * bearing calculation, geodesic distance accumulation, smoothed grade estimation,
+ * and Auto-Pause when speed < 0.5 km/h for > 5 seconds with Auto-Resume on movement.
+ */
+
+export interface GpsFix {
+  lat: number;
+  lng: number;
+  altitude: number; // meters
+  accuracy: number; // meters
+  speedKmh: number; // km/h
+  heading: number; // degrees 0-360
+  timestamp: number;
+}
+
+export function haversineDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371000; // Earth radius in meters
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+export function calculateBearingDegrees(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const y = Math.sin(((lon2 - lon1) * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180);
+  const x =
+    Math.cos((lat1 * Math.PI) / 180) * Math.sin((lat2 * Math.PI) / 180) -
+    Math.sin((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.cos(((lon2 - lon1) * Math.PI) / 180);
+  let brng = (Math.atan2(y, x) * 180) / Math.PI;
+  return (brng + 360) % 360;
+}
+
+class GpsService {
+  private watchId: number | null = null;
+  private prevFix: GpsFix | null = null;
+  private altitudeHistory: { alt: number; dist: number }[] = [];
+  private accumulatedDistMeters: number = 0;
+
+  // Auto-Pause state & timer
+  private lowSpeedStartTime: number | null = null;
+  private isAutoPaused: boolean = false;
+  private autoPauseCheckInterval: number | null = null;
+  private onAutoPauseChange: ((paused: boolean) => void) | null = null;
+
+  public isSupported(): boolean {
+    return typeof navigator !== 'undefined' && 'geolocation' in navigator;
+  }
+
+  public startTracking(
+    onFix: (fix: GpsFix, deltaDist: number, instantGrade: number) => void,
+    onError: (err: string) => void,
+    onAutoPauseChange?: (paused: boolean) => void
+  ): boolean {
+    if (!this.isSupported()) {
+      onError('Geolocation API is not supported on this device/browser.');
+      return false;
+    }
+
+    this.stopTracking();
+    this.onAutoPauseChange = onAutoPauseChange || null;
+    this.lowSpeedStartTime = null;
+    this.isAutoPaused = false;
+
+    const options: PositionOptions = {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 0
+    };
+
+    // Periodic check for auto-pause timeout even if stationary (when GPS doesn't emit fixes)
+    this.autoPauseCheckInterval = window.setInterval(() => {
+      if (this.lowSpeedStartTime && !this.isAutoPaused) {
+        if (Date.now() - this.lowSpeedStartTime >= 5000) {
+          this.isAutoPaused = true;
+          this.onAutoPauseChange?.(true);
+        }
+      }
+    }, 1000);
+
+    this.watchId = navigator.geolocation.watchPosition(
+      (pos: GeolocationPosition) => {
+        const coords = pos.coords;
+        const now = pos.timestamp;
+        const lat = coords.latitude;
+        const lng = coords.longitude;
+        const alt = coords.altitude ?? 0;
+        const acc = coords.accuracy ?? 10;
+
+        let deltaDist = 0;
+        let speedKmh = 0;
+        let heading = coords.heading ?? 0;
+
+        if (this.prevFix) {
+          const dtSeconds = Math.max(0.2, (now - this.prevFix.timestamp) / 1000);
+          const rawDist = haversineDistanceMeters(this.prevFix.lat, this.prevFix.lng, lat, lng);
+
+          // GPS Jitter filter: ignore tiny jumps below accuracy noise threshold when stationary
+          if (rawDist > Math.max(1.5, acc * 0.15)) {
+            deltaDist = rawDist;
+            this.accumulatedDistMeters += deltaDist;
+
+            // Heading calculation fallback if device heading is null or NaN
+            if (coords.heading === null || isNaN(coords.heading)) {
+              heading = calculateBearingDegrees(this.prevFix.lat, this.prevFix.lng, lat, lng);
+            }
+          }
+
+          // Speed calculation
+          if (coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0) {
+            speedKmh = coords.speed * 3.6;
+          } else if (deltaDist > 0 && dtSeconds > 0) {
+            speedKmh = (deltaDist / dtSeconds) * 3.6;
+          }
+        }
+
+        // AUTO-PAUSE & AUTO-RESUME LOGIC
+        // Speed drops below 0.5 km/h for > 5 seconds -> Auto Pause
+        // Speed >= 1.0 km/h or deltaDist > 1.8m -> Auto Resume
+        if (speedKmh < 0.5) {
+          if (!this.lowSpeedStartTime) {
+            this.lowSpeedStartTime = Date.now();
+          } else if (Date.now() - this.lowSpeedStartTime >= 5000 && !this.isAutoPaused) {
+            this.isAutoPaused = true;
+            this.onAutoPauseChange?.(true);
+          }
+        } else if (speedKmh >= 1.0 || deltaDist > 1.8) {
+          this.lowSpeedStartTime = null;
+          if (this.isAutoPaused) {
+            this.isAutoPaused = false;
+            this.onAutoPauseChange?.(false);
+          }
+        }
+
+        // Grade calculation over rolling distance buffer
+        this.altitudeHistory.push({ alt, dist: this.accumulatedDistMeters });
+        if (this.altitudeHistory.length > 8) {
+          this.altitudeHistory.shift();
+        }
+
+        let instantGrade = 0;
+        if (this.altitudeHistory.length >= 2) {
+          const oldest = this.altitudeHistory[0];
+          const spanDist = this.accumulatedDistMeters - oldest.dist;
+          const spanEle = alt - oldest.alt;
+          if (spanDist >= 8) {
+            instantGrade = (spanEle / spanDist) * 100;
+            instantGrade = Math.max(-25, Math.min(30, instantGrade));
+          }
+        }
+
+        const fix: GpsFix = {
+          lat,
+          lng,
+          altitude: alt,
+          accuracy: acc,
+          speedKmh: Math.round(speedKmh * 10) / 10,
+          heading: Math.round(heading),
+          timestamp: now
+        };
+
+        this.prevFix = fix;
+        onFix(fix, deltaDist, Math.round(instantGrade * 10) / 10);
+      },
+      (err: GeolocationPositionError) => {
+        let msg = 'GPS Error';
+        switch (err.code) {
+          case err.PERMISSION_DENIED:
+            msg = 'GPS permission denied. Please allow location access in your browser settings.';
+            break;
+          case err.POSITION_UNAVAILABLE:
+            msg = 'GPS position unavailable. Ensure Location/GPS is turned on.';
+            break;
+          case err.TIMEOUT:
+            msg = 'GPS acquisition timed out. Searching for satellite fix...';
+            break;
+        }
+        onError(msg);
+      },
+      options
+    );
+
+    return true;
+  }
+
+  public stopTracking() {
+    if (this.watchId !== null) {
+      navigator.geolocation.clearWatch(this.watchId);
+      this.watchId = null;
+    }
+    if (this.autoPauseCheckInterval !== null) {
+      clearInterval(this.autoPauseCheckInterval);
+      this.autoPauseCheckInterval = null;
+    }
+    this.lowSpeedStartTime = null;
+    this.isAutoPaused = false;
+  }
+
+  public resetDistance() {
+    this.accumulatedDistMeters = 0;
+    this.prevFix = null;
+    this.altitudeHistory = [];
+    this.lowSpeedStartTime = null;
+    this.isAutoPaused = false;
+  }
+}
+
+export const gpsService = new GpsService();

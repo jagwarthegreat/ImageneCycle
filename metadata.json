@@ -1,0 +1,6 @@
+{
+  "name": "Magene C706 Bike Computer & ClimbPro GPS",
+  "description": "Pixel-accurate clone of the Magene C706 GPS bike computer with ClimbPro real-time elevation profile, BLE sensor integration, and complete cross-platform Flutter mobile architecture.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

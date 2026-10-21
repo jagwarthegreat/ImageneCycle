@@ -1,0 +1,149 @@
+export interface RoutePoint {
+  lat: number;
+  lng: number;
+  ele: number;
+  distFromStart: number; // meters from route start
+  grade: number; // percentage (-10 to +25)
+  heading?: number; // bearing in degrees
+}
+
+export interface ProfileSlice {
+  distStart: number;
+  distEnd: number;
+  eleStart: number;
+  eleEnd: number;
+  grade: number;
+  color: string;
+}
+
+export type ClimbCategory = '4' | '3' | '2' | '1' | 'HC' | 'Uncategorized';
+
+export interface ClimbSegment {
+  id: string;
+  name: string;
+  startDist: number; // meters from route start
+  endDist: number; // meters from route start
+  totalLength: number; // meters
+  startEle: number; // meters
+  topEle: number; // meters
+  totalElevationGain: number; // meters
+  avgGrade: number; // %
+  maxGrade: number; // %
+  category: ClimbCategory;
+  points: RoutePoint[];
+  profileSlices: ProfileSlice[];
+}
+
+export interface RouteData {
+  id: string;
+  name: string;
+  location: string;
+  totalDistance: number; // meters
+  totalElevationGain: number; // meters
+  points: RoutePoint[];
+  climbs: ClimbSegment[];
+}
+
+export interface ClimbProLiveState {
+  isInClimb: boolean;
+  currentClimbIndex: number; // 1-indexed, e.g. Climb 2
+  totalClimbsCount: number; // e.g. of 4
+  currentClimb: ClimbSegment | null;
+  nextClimb: ClimbSegment | null;
+  distToNextClimb: number; // meters
+  distRemainingToTop: number; // meters
+  remAscent: number; // meters
+  avgGradeRemaining: number; // %
+  currentGrade: number; // instantaneous %
+  climbProgressPct: number; // 0 - 100
+  vam: number; // Vertical Ascent in m/hour
+}
+
+export interface ActiveRideSession {
+  id: string; // Unique session ID
+  startedAt: number; // Unix timestamp
+  updatedAt: number;
+  status: 'recording' | 'paused' | 'completed';
+  routeName: string;
+  routeId: string;
+  ridingTime: number; // Moving time in seconds
+  saddleTime: number; // Total elapsed time in seconds
+  distanceMeters: number;
+  totalAscentMeters: number;
+  maxSpeedKmh: number;
+  avgSpeedKmh: number;
+  currentElevation: number;
+  currentGrade: number;
+  vam: number;
+  calories: number;
+  breadcrumbs: { lat: number; lng: number }[];
+}
+
+export interface RideMetrics {
+  timeElapsed: number; // seconds (moving riding time)
+  ridingTime: number; // seconds moving
+  saddleTime: number; // total elapsed seconds from session start
+  distanceTraveled: number; // meters
+  speed: number; // km/h
+  avgSpeed: number; // km/h
+  maxSpeed: number; // km/h
+  currentElevation: number; // meters
+  totalAscent: number; // meters
+  currentGrade: number; // %
+  heartRate: number | null; // bpm or null if not connected
+  cadence: number | null; // rpm or null if not connected
+  power: number | null; // watts or null if not connected
+  powerZone?: number | null; // Coggan Zone 1-7
+  powerZoneName?: string | null; // e.g. 'Z2 Endurance'
+  powerZoneColor?: string | null; // e.g. '#3b82f6'
+  ftp: number; // Functional Threshold Power in Watts
+  isAutoPaused?: boolean;
+  calories: number; // kcal
+  vam: number; // m/h
+  currentLat: number;
+  currentLng: number;
+  currentHeading: number;
+  activeSessionId?: string | null;
+}
+
+export interface BleDeviceStatus {
+  hrmConnected: boolean;
+  cscConnected: boolean;
+  powerConnected: boolean;
+  hrmDeviceName?: string;
+  cscDeviceName?: string;
+  powerDeviceName?: string;
+}
+
+export interface GpsStatus {
+  hasFix: boolean;
+  accuracy: number; // meters
+  quality: 'GPS 3D' | 'GPS 2D' | 'Searching...' | 'Standby' | 'Error';
+  errorMessage?: string;
+}
+
+export interface AutoLapAlert {
+  lapNumber: number;
+  lapDistanceMeters: number;
+  splitTimeSeconds: number;
+  avgSpeedKmh: number;
+  timestamp: number;
+}
+
+export interface RideHistoryItem {
+  id: string;
+  timestamp: number;
+  startedAt?: number;
+  dateFormatted: string;
+  routeName: string;
+  timeElapsed: number; // seconds
+  ridingTimeSeconds?: number;
+  saddleTimeSeconds?: number;
+  distanceMeters: number;
+  totalAscentMeters: number;
+  avgSpeedKmh: number;
+  maxSpeedKmh: number;
+  calories: number;
+  avgPowerWatts?: number | null;
+  breadcrumbs?: { lat: number; lng: number }[];
+}
