@@ -14,6 +14,10 @@ export interface GpsFix {
   heading: number; // degrees 0-360
   timestamp: number;
   vam: number; // m/h, 30s sliding window
+  /** Derived lock quality for HUD */
+  quality: 'GPS 3D' | 'GPS 2D' | 'Weak' | 'Searching...';
+  /** When true, App should update coords/HUD only — do not accumulate ride distance */
+  displayOnly?: boolean;
 }
 
 export interface GpsTrackingOptions {
@@ -45,8 +49,19 @@ export function calculateBearingDegrees(lat1: number, lon1: number, lat2: number
   return (brng + 360) % 360;
 }
 
+export function accuracyToQuality(accuracy: number): GpsFix['quality'] {
+  if (accuracy < 15) return 'GPS 3D';
+  if (accuracy < 40) return 'GPS 2D';
+  if (Number.isFinite(accuracy) && accuracy < 500) return 'Weak';
+  return 'Searching...';
+}
+
 const VAM_WINDOW_MS = 30_000;
 const BATTERY_SAVER_INTERVAL_MS = 10_000;
+const GPS_TIMEOUT_MS = 25_000;
+const WARMUP_MAX_ACC_M = 50;
+const TRACKING_MAX_ACC_M = 80;
+const MAX_JUMP_KMH = 80;
 
 class GpsService {
   private watchId: number | null = null;
@@ -56,6 +71,7 @@ class GpsService {
   private altitudeTimeHistory: { alt: number; t: number }[] = [];
   private accumulatedDistMeters: number = 0;
   private slidingVam: number = 0;
+  private hasGoodLock = false;
 
   // Auto-Pause state & timer
   private lowSpeedStartTime: number | null = null;
@@ -75,6 +91,14 @@ class GpsService {
     return this.slidingVam;
   }
 
+  private geoOptions(maxAge: number): PositionOptions {
+    return {
+      enableHighAccuracy: true,
+      timeout: GPS_TIMEOUT_MS,
+      maximumAge: maxAge
+    };
+  }
+
   public startTracking(
     onFix: (fix: GpsFix, deltaDist: number, instantGrade: number) => void,
     onError: (err: string) => void,
@@ -92,9 +116,9 @@ class GpsService {
     this.onAutoPauseChange = onAutoPauseChange || null;
     this.lowSpeedStartTime = null;
     this.isAutoPaused = false;
+    this.hasGoodLock = false;
     this.batterySaver = !!options?.batterySaver;
 
-    // Periodic check for auto-pause timeout even if stationary (when GPS doesn't emit fixes)
     this.autoPauseCheckInterval = window.setInterval(() => {
       if (this.lowSpeedStartTime && !this.isAutoPaused) {
         if (Date.now() - this.lowSpeedStartTime >= 5000) {
@@ -109,11 +133,7 @@ class GpsService {
         navigator.geolocation.getCurrentPosition(
           (pos) => this.handlePosition(pos),
           (err) => this.handleError(err),
-          {
-            enableHighAccuracy: true,
-            timeout: 10000,
-            maximumAge: BATTERY_SAVER_INTERVAL_MS
-          }
+          this.geoOptions(BATTERY_SAVER_INTERVAL_MS)
         );
       };
       poll();
@@ -122,11 +142,7 @@ class GpsService {
       this.watchId = navigator.geolocation.watchPosition(
         (pos) => this.handlePosition(pos),
         (err) => this.handleError(err),
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0
-        }
+        this.geoOptions(0)
       );
     }
 
@@ -163,7 +179,34 @@ class GpsService {
     const lat = coords.latitude;
     const lng = coords.longitude;
     const alt = coords.altitude ?? 0;
-    const acc = coords.accuracy ?? 10;
+    const acc = coords.accuracy ?? 999;
+
+    // Warm-up: need a decent fix before accepting tracking; then allow slightly looser
+    const maxAcc = this.hasGoodLock ? TRACKING_MAX_ACC_M : WARMUP_MAX_ACC_M;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return;
+    }
+    if (acc > maxAcc) {
+      // HUD: show Weak (±m) instead of silent Searching — do not accumulate distance
+      this.onFixCb?.(
+        {
+          lat,
+          lng,
+          altitude: alt,
+          accuracy: acc,
+          speedKmh: 0,
+          heading: coords.heading ?? 0,
+          timestamp: now,
+          vam: this.slidingVam,
+          quality: accuracyToQuality(acc),
+          displayOnly: true
+        },
+        0,
+        0
+      );
+      return;
+    }
+    this.hasGoodLock = true;
 
     let deltaDist = 0;
     let speedKmh = 0;
@@ -172,19 +215,22 @@ class GpsService {
     if (this.prevFix) {
       const dtSeconds = Math.max(0.2, (now - this.prevFix.timestamp) / 1000);
       const rawDist = haversineDistanceMeters(this.prevFix.lat, this.prevFix.lng, lat, lng);
+      const impliedKmh = (rawDist / dtSeconds) * 3.6;
 
-      // GPS Jitter filter: ignore tiny jumps below accuracy noise threshold when stationary
+      // Drop impossible jumps when accuracy is weak
+      if (impliedKmh > MAX_JUMP_KMH && acc > 25) {
+        return;
+      }
+
       if (rawDist > Math.max(1.5, acc * 0.15)) {
         deltaDist = rawDist;
         this.accumulatedDistMeters += deltaDist;
 
-        // Heading calculation fallback if device heading is null or NaN
         if (coords.heading === null || isNaN(coords.heading)) {
           heading = calculateBearingDegrees(this.prevFix.lat, this.prevFix.lng, lat, lng);
         }
       }
 
-      // Speed calculation
       if (coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0) {
         speedKmh = coords.speed * 3.6;
       } else if (deltaDist > 0 && dtSeconds > 0) {
@@ -192,7 +238,6 @@ class GpsService {
       }
     }
 
-    // AUTO-PAUSE & AUTO-RESUME LOGIC
     if (speedKmh < 0.5) {
       if (!this.lowSpeedStartTime) {
         this.lowSpeedStartTime = Date.now();
@@ -208,7 +253,6 @@ class GpsService {
       }
     }
 
-    // Grade calculation over rolling distance buffer
     this.altitudeHistory.push({ alt, dist: this.accumulatedDistMeters });
     if (this.altitudeHistory.length > 8) {
       this.altitudeHistory.shift();
@@ -226,6 +270,7 @@ class GpsService {
     }
 
     const vam = this.updateSlidingVam(alt, now);
+    const quality = accuracyToQuality(acc);
 
     const fix: GpsFix = {
       lat,
@@ -235,7 +280,8 @@ class GpsService {
       speedKmh: Math.round(speedKmh * 10) / 10,
       heading: Math.round(heading),
       timestamp: now,
-      vam
+      vam,
+      quality
     };
 
     this.prevFix = fix;
@@ -273,6 +319,7 @@ class GpsService {
     }
     this.lowSpeedStartTime = null;
     this.isAutoPaused = false;
+    this.hasGoodLock = false;
     this.onFixCb = null;
     this.onErrorCb = null;
   }
@@ -285,6 +332,7 @@ class GpsService {
     this.slidingVam = 0;
     this.lowSpeedStartTime = null;
     this.isAutoPaused = false;
+    this.hasGoodLock = false;
   }
 }
 

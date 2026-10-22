@@ -1,0 +1,24 @@
+{
+  "format": "magene-nav-v1",
+  "id": "ph",
+  "name": "Philippines",
+  "fileHint": "ph - Philippines.nav.json",
+  "bbox": {
+    "minLat": 4.0,
+    "maxLat": 21.5,
+    "minLng": 116.0,
+    "maxLng": 127.0
+  },
+  "capabilities": {
+    "offlineCreateRoute": false,
+    "offlineSavedTurnByTurn": true,
+    "offlineRouterGraph": false
+  },
+  "notes": [
+    "Magene Navigation Data pack (not Guru .rt).",
+    "Route create still uses online OSRM when available.",
+    "Saved route turn-by-turn continues to work offline.",
+    "Full offline OSRM/GraphHopper graph is not shipped in this Vite SPA; this pack reserves the N badge and bbox for a future offline router."
+  ],
+  "updatedAt": "2026-03-22"
+}

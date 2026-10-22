@@ -1,22 +1,28 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { RouteData, RoutePoint, ClimbSegment, RideMetrics, BleDeviceStatus, GpsStatus, RideHistoryItem, ActiveRideSession, AutoLapAlert } from './types/cycling';
-import { PRESET_ROUTES, parseGpxRoute } from './data/routes';
+import { parseGpxRoute } from './data/routes';
 import { calculateClimbProLiveState } from './utils/climbProEngine';
 import { bleManager } from './utils/bleManager';
-import { gpsService, GpsFix } from './utils/gpsService';
+import { gpsService, GpsFix, accuracyToQuality } from './utils/gpsService';
 import { bikeBeeper } from './utils/audioAlerts';
 import { getPowerZoneInfo, getHeartRateZoneInfo, POWER_ZONES_CONFIG, HR_ZONES_CONFIG } from './utils/powerZones';
 import { loadRideHistory, saveRideToHistory, deleteRideFromHistory, clearRideHistory, loadActiveSession, saveActiveSession, clearActiveSession } from './utils/rideHistory';
 import { exportRideToGpx, exportRideToJson, openStravaUpload } from './utils/rideExport';
 import { fetchLiveWeather, WeatherData } from './services/weatherService';
 import { captureStravaRedirectTokens, isStravaConnected, startStravaConnect, clearStravaTokens } from './utils/stravaAuth';
+import { loadUserRoutes, loadUserRoutesAsync, saveUserRoute, deleteUserRoute } from './utils/routeLibrary';
+import { OFFLINE_MAP_LABEL, probeOfflineMapAvailable } from './utils/offlineMap';
+import { freeRideClimbRecorder } from './utils/freeRideClimbRecorder';
 import { MageneDevice } from './components/MageneDevice';
 import { BleSensorModal } from './components/BleSensorModal';
 import { ClimbManualInputModal } from './components/ClimbManualInputModal';
 import { FlutterArchitectureModal } from './components/FlutterArchitectureModal';
 import { RideSummaryModal } from './components/RideSummaryModal';
 import { StartActivityPrompt } from './components/StartActivityPrompt';
+import { RouteBuilderModal } from './components/RouteBuilderModal';
+import { DownloadMapsModal } from './components/DownloadMapsModal';
+import { MapsStorageModal } from './components/MapsStorageModal';
 import { 
   X, 
   Upload, 
@@ -44,13 +50,32 @@ import {
   Download,
   ExternalLink,
   Battery,
-  Heart
+  Heart,
+  Map,
+  HardDrive
 } from 'lucide-react';
 
 export default function App() {
-  // Optional custom routes (empty by default for Free Ride / Live GPS Tracking)
-  const [routes, setRoutes] = useState<RouteData[]>([]);
-  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  // User routes (localStorage) + optional active planned course
+  const [routes, setRoutes] = useState<RouteData[]>(() => loadUserRoutes());
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    try {
+      const id = localStorage.getItem('magene-selected-route-id');
+      if (!id) return null;
+      const list = loadUserRoutes();
+      return list.some(r => r.id === id) ? id : null;
+    } catch {
+      return null;
+    }
+  });
+  const [isRouteBuilderOpen, setIsRouteBuilderOpen] = useState(false);
+  const [freeClimbTick, setFreeClimbTick] = useState(0);
+  const [fitRouteToken, setFitRouteToken] = useState(0);
+  const [offlineMapAvailable, setOfflineMapAvailable] = useState<boolean | null>(null);
+  const [isDownloadMapsOpen, setIsDownloadMapsOpen] = useState(false);
+  const [isMapsStorageOpen, setIsMapsStorageOpen] = useState(false);
+  const [basemapToken, setBasemapToken] = useState(0);
 
   const activeRoute = useMemo<RouteData | null>(() => {
     if (!selectedRouteId) return null;
@@ -58,46 +83,41 @@ export default function App() {
   }, [routes, selectedRouteId]);
 
   // Active Activity Session State (Persisted in localStorage)
+  // Idle on load: no auto-record. Orphan session → RESUME (paused), not recording.
   const [activeSession, setActiveSession] = useState<ActiveRideSession | null>(() => loadActiveSession());
   const [ridingTime, setRidingTime] = useState<number>(() => {
     const s = loadActiveSession();
-    return s ? s.ridingTime : 135;
+    return s ? s.ridingTime : 0;
   });
   const [saddleTime, setSaddleTime] = useState<number>(() => {
     const s = loadActiveSession();
-    return s ? s.saddleTime : 135;
+    return s ? s.saddleTime : 0;
   });
 
   // Production Ride State
-  const [isRecording, setIsRecording] = useState<boolean>(() => {
-    const s = loadActiveSession();
-    return s ? true : false;
-  });
-  const [isPaused, setIsPaused] = useState<boolean>(() => {
-    const s = loadActiveSession();
-    return s ? (s.status === 'paused') : false;
-  });
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [isPaused, setIsPaused] = useState<boolean>(() => !!loadActiveSession());
   const [isAutoPaused, setIsAutoPaused] = useState<boolean>(false);
   const [timeElapsed, setTimeElapsed] = useState<number>(() => {
     const s = loadActiveSession();
-    return s ? s.ridingTime : 135;
+    return s ? s.ridingTime : 0;
   });
   const [distanceTraveled, setDistanceTraveled] = useState<number>(() => {
     const s = loadActiveSession();
-    return s ? s.distanceMeters : 450;
+    return s ? s.distanceMeters : 0;
   });
-  const [speed, setSpeed] = useState<number>(18.9);
+  const [speed, setSpeed] = useState<number>(0);
   const [maxSpeed, setMaxSpeed] = useState<number>(() => {
     const s = loadActiveSession();
-    return s ? s.maxSpeedKmh : 18.9;
+    return s ? s.maxSpeedKmh : 0;
   });
-  const [currentElevation, setCurrentElevation] = useState<number>(187);
+  const [currentElevation, setCurrentElevation] = useState<number>(0);
   const [totalAscent, setTotalAscent] = useState<number>(() => {
     const s = loadActiveSession();
-    return s ? s.totalAscentMeters : 32;
+    return s ? s.totalAscentMeters : 0;
   });
-  const [currentGrade, setCurrentGrade] = useState<number>(4.0);
-  const [currentHeading, setCurrentHeading] = useState<number>(45);
+  const [currentGrade, setCurrentGrade] = useState<number>(0);
+  const [currentHeading, setCurrentHeading] = useState<number>(0);
 
   // User FTP Configuration (default: 250W)
   const [ftp, setFtp] = useState<number>(() => {
@@ -162,10 +182,13 @@ export default function App() {
 
   // GPS Device Status
   const [gpsStatus, setGpsStatus] = useState<GpsStatus>({
-    hasFix: true,
-    accuracy: 4,
-    quality: 'GPS 3D'
+    hasFix: false,
+    accuracy: 0,
+    quality: 'Searching...'
   });
+  const [isOnline, setIsOnline] = useState(
+    () => typeof navigator === 'undefined' || navigator.onLine
+  );
 
   // Real BLE Sensors (null when not connected)
   const [heartRate, setHeartRate] = useState<number | null>(null);
@@ -221,6 +244,10 @@ export default function App() {
   const hasDismissedPromptRef = useRef<boolean>(false);
   const prevClimbInRef = useRef<boolean>(false);
   const lastAltRef = useRef<number>(187);
+  const selectedRouteIdRef = useRef<string | null>(selectedRouteId);
+  selectedRouteIdRef.current = selectedRouteId;
+  const distanceTraveledRef = useRef(distanceTraveled);
+  distanceTraveledRef.current = distanceTraveled;
 
   // Sound sync
   useEffect(() => {
@@ -264,12 +291,17 @@ export default function App() {
 
   const fetchWeather = async (lat: number, lng: number) => {
     if (!lat || !lng) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setWeather(null);
+      setWeatherLoading(false);
+      return;
+    }
     setWeatherLoading(true);
     try {
       const data = await fetchLiveWeather(lat, lng);
       setWeather(data);
     } catch {
-      // weatherService already falls back gracefully
+      setWeather(null);
     } finally {
       setWeatherLoading(false);
     }
@@ -284,15 +316,23 @@ export default function App() {
     }
   }, []);
 
-  // Weather poll every 15 minutes from live GPS coords
+  // Weather poll every 15 minutes from live GPS coords (online only)
   useEffect(() => {
-    if (!currentCoords.lat || !currentCoords.lng) return;
+    if (!isOnline || !currentCoords.lat || !currentCoords.lng) return;
     fetchWeather(currentCoords.lat, currentCoords.lng);
     const interval = setInterval(() => {
       fetchWeather(currentCoords.lat, currentCoords.lng);
     }, 15 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [currentCoords.lat, currentCoords.lng]);
+  }, [currentCoords.lat, currentCoords.lng, isOnline]);
+
+  // Merge IndexedDB routes + probe shipped PH basemap
+  useEffect(() => {
+    void loadUserRoutesAsync().then(list => {
+      if (list.length) setRoutes(list);
+    });
+    void probeOfflineMapAvailable().then(setOfflineMapAvailable);
+  }, []);
 
   // Subscribe to real BLE hardware streams
   useEffect(() => {
@@ -318,18 +358,31 @@ export default function App() {
           } catch {}
           if (altitude && altitude > 0) setCurrentElevation(Math.round(altitude));
           if (heading && !isNaN(heading)) setCurrentHeading(heading);
+          const acc = accuracy || 999;
           setGpsStatus({
-            hasFix: true,
-            accuracy: accuracy || 4,
-            quality: (accuracy || 10) <= 10 ? 'GPS 3D' : 'GPS 2D'
+            hasFix: acc <= 80,
+            accuracy: acc,
+            quality: accuracyToQuality(acc)
           });
         },
         (err) => {
           console.warn('Initial geolocation:', err.message);
+          setGpsStatus(prev => ({ ...prev, quality: 'Searching...' }));
         },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 }
       );
     }
+  }, []);
+
+  useEffect(() => {
+    const on = () => setIsOnline(true);
+    const off = () => setIsOnline(false);
+    window.addEventListener('online', on);
+    window.addEventListener('offline', off);
+    return () => {
+      window.removeEventListener('online', on);
+      window.removeEventListener('offline', off);
+    };
   }, []);
 
   // Real Production GPS Tracker with Auto-Pause (<0.5 km/h for >5s) and Auto-Resume
@@ -338,16 +391,25 @@ export default function App() {
 
     const success = gpsService.startTracking(
       (fix: GpsFix, deltaDist: number, instantGrade: number) => {
+        const quality = fix.quality || accuracyToQuality(fix.accuracy);
         setGpsStatus({
-          hasFix: true,
+          hasFix: !fix.displayOnly || fix.accuracy < 200,
           accuracy: fix.accuracy,
-          quality: fix.accuracy <= 10 ? 'GPS 3D' : 'GPS 2D'
+          quality
         });
 
         setCurrentCoords({ lat: fix.lat, lng: fix.lng });
         try {
           localStorage.setItem('magene-last-known-gps', JSON.stringify({ lat: fix.lat, lng: fix.lng }));
         } catch {}
+
+        // Weak / display-only: update map puck + HUD only
+        if (fix.displayOnly) {
+          if (fix.heading) setCurrentHeading(fix.heading);
+          if (fix.altitude > 0) setCurrentElevation(Math.round(fix.altitude));
+          return;
+        }
+
         setCurrentHeading(fix.heading);
         setSlidingVam(fix.vam ?? gpsService.getSlidingVam());
 
@@ -367,9 +429,12 @@ export default function App() {
         }
 
         // Record live path breadcrumb if recording and moving
+        let nextDist = distanceTraveledRef.current;
         if (isRecording && !isPaused && deltaDist > 0) {
+          nextDist = distanceTraveledRef.current + deltaDist;
+          distanceTraveledRef.current = nextDist;
           setLiveBreadcrumbs(prev => [...prev.slice(-400), { lat: fix.lat, lng: fix.lng }]);
-          setDistanceTraveled(prev => prev + deltaDist);
+          setDistanceTraveled(nextDist);
         }
 
         // Elevation and smoothed grade
@@ -382,6 +447,18 @@ export default function App() {
         }
 
         setCurrentGrade(instantGrade);
+
+        // Free Ride ClimbPro recording (no planned route)
+        if (isRecording && !isPaused && !selectedRouteIdRef.current && deltaDist > 0) {
+          freeRideClimbRecorder.pushSample(
+            fix.lat,
+            fix.lng,
+            fix.altitude > 0 ? fix.altitude : lastAltRef.current,
+            nextDist,
+            instantGrade
+          );
+          setFreeClimbTick(t => t + 1);
+        }
       },
       (err: string) => {
         setGpsStatus({
@@ -523,15 +600,18 @@ export default function App() {
     };
   }, [currentCoords, currentElevation, distanceTraveled, currentGrade, currentHeading]);
 
-  // ClimbPro Live Calculation
+  // ClimbPro Live Calculation (planned route vs free-ride recorder)
   const climbState = useMemo(() => {
-    return calculateClimbProLiveState(
-      distanceTraveled,
-      activeRoute ? activeRoute.climbs : [],
-      currentElevation,
-      currentGrade
-    );
-  }, [distanceTraveled, activeRoute, currentElevation, currentGrade]);
+    if (activeRoute) {
+      return calculateClimbProLiveState(
+        distanceTraveled,
+        activeRoute.climbs,
+        currentElevation,
+        currentGrade
+      );
+    }
+    return freeRideClimbRecorder.toClimbProState(currentElevation, currentGrade);
+  }, [distanceTraveled, activeRoute, currentElevation, currentGrade, freeClimbTick]);
 
   // Chimes
   useEffect(() => {
@@ -631,27 +711,45 @@ export default function App() {
     setLapCount(0);
     setLatestLapAlert(null);
     setShowStartPrompt(false);
+    freeRideClimbRecorder.reset();
+    setFreeClimbTick(t => t + 1);
     bikeBeeper.beep(2600, 0.12);
   };
 
   // Actions
   const handleToggleStartPause = () => {
-    if (!isRecording) {
+    // Idle → create session and record
+    if (!activeSession) {
       handleStartNewActivity();
-    } else {
-      const nextPaused = !isPaused;
-      setIsPaused(nextPaused);
-      if (!nextPaused) setIsAutoPaused(false);
-      bikeBeeper.beep(nextPaused ? 1800 : 2600, 0.08);
-
-      if (activeSession) {
-        saveActiveSession({
-          ...activeSession,
-          status: nextPaused ? 'paused' : 'recording',
-          updatedAt: Date.now()
-        });
-      }
+      return;
     }
+
+    // Orphan / paused session → resume recording
+    if (!isRecording || isPaused) {
+      setIsRecording(true);
+      setIsPaused(false);
+      setIsAutoPaused(false);
+      const resumed = {
+        ...activeSession,
+        status: 'recording' as const,
+        updatedAt: Date.now()
+      };
+      setActiveSession(resumed);
+      saveActiveSession(resumed);
+      bikeBeeper.beep(2600, 0.08);
+      return;
+    }
+
+    // Recording → pause
+    setIsPaused(true);
+    bikeBeeper.beep(1800, 0.08);
+    const paused = {
+      ...activeSession,
+      status: 'paused' as const,
+      updatedAt: Date.now()
+    };
+    setActiveSession(paused);
+    saveActiveSession(paused);
   };
 
   const handleLap = () => {
@@ -755,6 +853,8 @@ export default function App() {
     setLapCount(0);
     setLatestLapAlert(null);
     setIsRideSummaryOpen(false);
+    freeRideClimbRecorder.reset();
+    setFreeClimbTick(t => t + 1);
   };
 
   // Reset Ride with LocalStorage History Persistence
@@ -811,10 +911,50 @@ export default function App() {
     bikeBeeper.beep(2600, 0.05);
   };
 
+  const persistSelectedRouteId = (routeId: string | null) => {
+    setSelectedRouteId(routeId);
+    try {
+      if (routeId) localStorage.setItem('magene-selected-route-id', routeId);
+      else localStorage.removeItem('magene-selected-route-id');
+    } catch {}
+  };
+
   // Clear active route to return to pure Free Ride mode
   const handleClearRoute = () => {
-    setSelectedRouteId(null);
+    persistSelectedRouteId(null);
     bikeBeeper.beep(2000, 0.05);
+  };
+
+  const handleSaveUserRoute = (route: RouteData) => {
+    const updated = saveUserRoute(route);
+    setRoutes(updated);
+    setIsRouteBuilderOpen(false);
+    bikeBeeper.beep(2400, 0.08);
+  };
+
+  /** Select route as current ride: persist, close menus, fit map to course */
+  const activateRouteAsCurrentRide = (routeId: string) => {
+    persistSelectedRouteId(routeId);
+    setIsRouteBuilderOpen(false);
+    setIsMenuDrawerOpen(false);
+    setFitRouteToken(t => t + 1);
+    bikeBeeper.beep(2600, 0.1);
+  };
+
+  const handleUseRouteAsCurrentRide = (route: RouteData) => {
+    const updated = saveUserRoute(route);
+    setRoutes(updated);
+    activateRouteAsCurrentRide(route.id);
+  };
+
+  const handleUseSavedRoute = (routeId: string) => {
+    activateRouteAsCurrentRide(routeId);
+  };
+
+  const handleDeleteSavedRoute = (routeId: string) => {
+    const updated = deleteUserRoute(routeId);
+    setRoutes(updated);
+    if (selectedRouteId === routeId) persistSelectedRouteId(null);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -826,12 +966,11 @@ export default function App() {
       try {
         const text = event.target?.result as string;
         const parsed = parseGpxRoute(text, file.name);
-        setRoutes(prev => [parsed, ...prev.filter(r => r.id !== parsed.id)]);
-        setSelectedRouteId(parsed.id);
+        const updated = saveUserRoute(parsed);
+        setRoutes(updated);
         setDistanceTraveled(0);
         setTimeElapsed(0);
-        bikeBeeper.climbAlert();
-        setIsMenuDrawerOpen(false);
+        activateRouteAsCurrentRide(parsed.id);
       } catch (err: any) {
         alert(`GPX import error: ${err.message}`);
       }
@@ -851,7 +990,8 @@ export default function App() {
         climbs: [newClimb]
       };
       setRoutes([customRoute]);
-      setSelectedRouteId(customRoute.id);
+      persistSelectedRouteId(customRoute.id);
+      setFitRouteToken(t => t + 1);
     } else {
       setRoutes(prev =>
         prev.map(r => {
@@ -879,6 +1019,7 @@ export default function App() {
           climbState={climbState}
           currentPoint={currentPoint}
           routePoints={activeRoute ? activeRoute.points : []}
+          routeTurns={activeRoute?.turns || []}
           routeName={activeRoute?.name}
           bleStatus={bleStatus}
           gpsStatus={gpsStatus}
@@ -897,6 +1038,9 @@ export default function App() {
           weather={weather}
           weatherLoading={weatherLoading}
           batterySaver={batterySaver}
+          fitRouteToken={fitRouteToken}
+          isOnline={isOnline}
+          basemapToken={basemapToken}
         />
       </div>
 
@@ -1003,13 +1147,25 @@ export default function App() {
                   <div className="p-3 rounded-xl bg-zinc-850/80 border border-zinc-750 text-xs font-sports">
                     {activeRoute ? (
                       <div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-[10px] text-zinc-400 uppercase font-bold">CUSTOM ROUTE LOADED</span>
-                          <span className="text-[10px] text-blue-400 font-bold">{(activeRoute.totalDistance / 1000).toFixed(1)} km</span>
-                        </div>
-                        <div className="font-bold text-white text-sm mt-1 truncate">
-                          {activeRoute.name}
-                        </div>
+                        <button
+                          type="button"
+                          onClick={() => activateRouteAsCurrentRide(activeRoute.id)}
+                          className="w-full text-left rounded-lg hover:bg-zinc-800/60 -m-1 p-1 transition-colors"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-zinc-400 uppercase font-bold">CUSTOM ROUTE LOADED</span>
+                            <span className="text-[10px] text-blue-400 font-bold">{(activeRoute.totalDistance / 1000).toFixed(1)} km</span>
+                          </div>
+                          <div className="font-bold text-white text-sm mt-1 truncate">
+                            {activeRoute.name}
+                          </div>
+                          <div className="text-[10px] text-zinc-400 mt-0.5">
+                            +{activeRoute.totalElevationGain} m · {activeRoute.climbs.length} climbs
+                          </div>
+                          <div className="text-[10px] text-blue-400 font-bold mt-1">
+                            Tap to show course on map
+                          </div>
+                        </button>
                         <button
                           onClick={handleClearRoute}
                           className="mt-2 w-full py-1.5 px-2 rounded-lg bg-zinc-800 hover:bg-rose-950/60 border border-zinc-700 hover:border-rose-600/50 text-zinc-300 hover:text-rose-400 text-[11px] font-bold transition-colors flex items-center justify-center gap-1.5"
@@ -1025,8 +1181,75 @@ export default function App() {
                           <span>FREE RIDE MODE ACTIVE</span>
                         </div>
                         <p className="text-[11px] text-zinc-400 font-normal leading-relaxed">
-                          Your live GPS location is tracked directly on the map. No preloaded courses or fixed routes are overriding your screen.
+                          Live GPS tracking with ClimbPro recording climbs as you ride. Create a route to load a planned course.
                         </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Create + saved routes */}
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsMenuDrawerOpen(false);
+                        setIsRouteBuilderOpen(true);
+                      }}
+                      className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-sports font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm"
+                    >
+                      <Flag className="w-3.5 h-3.5" />
+                      <span>Create Route (Start → Dest)</span>
+                    </button>
+
+                    {routes.length > 0 && (
+                      <div className="space-y-1.5">
+                        <span className="text-[10px] text-zinc-400 uppercase font-bold">Saved routes</span>
+                        {routes.map(r => (
+                          <div
+                            key={r.id}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => handleUseSavedRoute(r.id)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                handleUseSavedRoute(r.id);
+                              }
+                            }}
+                            className={`p-2 rounded-xl border text-xs cursor-pointer transition-colors ${
+                              selectedRouteId === r.id
+                                ? 'bg-blue-950/40 border-blue-500/50'
+                                : 'bg-zinc-850 border-zinc-800 hover:border-zinc-600'
+                            }`}
+                          >
+                            <div className="font-bold text-zinc-100 truncate">{r.name}</div>
+                            <div className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                              {(r.totalDistance / 1000).toFixed(1)} km · +{r.totalElevationGain} m · {r.climbs.length} climbs
+                            </div>
+                            <div className="flex gap-1.5 mt-1.5">
+                              <button
+                                type="button"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  handleUseSavedRoute(r.id);
+                                }}
+                                className="flex-1 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px]"
+                              >
+                                Use as ride
+                              </button>
+                              <button
+                                type="button"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  handleDeleteSavedRoute(r.id);
+                                }}
+                                className="px-2 py-1 rounded-lg bg-zinc-800 text-zinc-400 hover:text-rose-400"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -1357,6 +1580,57 @@ export default function App() {
                     </p>
                   </div>
 
+                  {/* Offline maps (download countries to phone; world overview until then) */}
+                  <div className="bg-zinc-850 p-3 rounded-xl border border-zinc-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-white uppercase text-xs flex items-center gap-1.5">
+                        <Map className="w-4 h-4 text-emerald-400" />
+                        Offline maps
+                      </span>
+                      <span className={`text-[10px] font-bold ${
+                        offlineMapAvailable === true
+                          ? 'text-emerald-400'
+                          : offlineMapAvailable === false
+                          ? 'text-amber-400'
+                          : 'text-zinc-500'
+                      }`}>
+                        {offlineMapAvailable === true
+                          ? 'Pack installed'
+                          : offlineMapAvailable === false
+                          ? 'World only'
+                          : '…'}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-zinc-400 leading-relaxed">
+                      {OFFLINE_MAP_LABEL} (OpenStreetMap). First load is a world overview — download a
+                      country for offline detail. Guru .vm / .rt / .elv are not supported.
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsMenuDrawerOpen(false);
+                          setIsDownloadMapsOpen(true);
+                        }}
+                        className="py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-sports font-bold text-[10px] uppercase tracking-wider flex items-center justify-center gap-1"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Download Maps
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsMenuDrawerOpen(false);
+                          setIsMapsStorageOpen(true);
+                        }}
+                        className="py-2 rounded-lg bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 font-sports font-bold text-[10px] uppercase tracking-wider flex items-center justify-center gap-1"
+                      >
+                        <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
+                        Maps Storage
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Strava Connect */}
                   <div className="bg-zinc-850 p-3 rounded-xl border border-zinc-800 space-y-2">
                     <div className="flex items-center justify-between">
@@ -1365,7 +1639,7 @@ export default function App() {
                         Strava
                       </span>
                       <span className={`text-[10px] font-bold ${stravaConnected ? 'text-emerald-400' : 'text-zinc-500'}`}>
-                        {stravaConnected ? 'Connected' : 'Not connected'}
+                        {!isOnline ? 'Needs internet' : stravaConnected ? 'Connected' : 'Not connected'}
                       </span>
                     </div>
                     {stravaConnected ? (
@@ -1382,14 +1656,21 @@ export default function App() {
                     ) : (
                       <button
                         type="button"
-                        onClick={startStravaConnect}
-                        className="w-full py-1.5 rounded-lg bg-[#FC4C02] text-white font-bold text-[11px]"
+                        disabled={!isOnline}
+                        onClick={() => {
+                          try {
+                            startStravaConnect();
+                          } catch (err) {
+                            alert(err instanceof Error ? err.message : 'Strava needs internet');
+                          }
+                        }}
+                        className="w-full py-1.5 rounded-lg bg-[#FC4C02] text-white font-bold text-[11px] disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         Connect with Strava
                       </button>
                     )}
                     <p className="text-[10px] text-zinc-400">
-                      Requires Express OAuth server (`npm run dev:server`) and Strava API credentials.
+                      Requires internet. Also needs Express OAuth (`npm run dev:server`) and Strava API credentials.
                     </p>
                   </div>
 
@@ -1610,6 +1891,30 @@ export default function App() {
             onAddOrUpdateClimb={handleAddManualClimb}
             currentDist={distanceTraveled}
             currentElevation={currentElevation}
+          />
+
+          <RouteBuilderModal
+            isOpen={isRouteBuilderOpen}
+            onClose={() => setIsRouteBuilderOpen(false)}
+            currentCoords={currentCoords}
+            onSave={handleSaveUserRoute}
+            onUseAsCurrentRide={handleUseRouteAsCurrentRide}
+          />
+
+          <DownloadMapsModal
+            isOpen={isDownloadMapsOpen}
+            onClose={() => setIsDownloadMapsOpen(false)}
+            currentLat={currentCoords.lat}
+            currentLng={currentCoords.lng}
+            onPacksChanged={() => {
+              setBasemapToken(t => t + 1);
+              void probeOfflineMapAvailable(true).then(setOfflineMapAvailable);
+            }}
+          />
+
+          <MapsStorageModal
+            isOpen={isMapsStorageOpen}
+            onClose={() => setIsMapsStorageOpen(false)}
           />
 
           <FlutterArchitectureModal
