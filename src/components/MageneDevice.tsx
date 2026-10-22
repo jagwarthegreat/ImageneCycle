@@ -6,7 +6,6 @@ import {
   Heart, 
   Zap, 
   Activity, 
-  Navigation, 
   Mountain, 
   Sun, 
   Moon, 
@@ -34,6 +33,8 @@ import {
   getRouteRemainingAvgGrade,
   getNextTurn
 } from '../utils/routeEncode';
+import { getRouteElevation } from '../utils/elevationService';
+import { calculateGpsSignalBars } from '../utils/gpsSignalBars';
 
 interface MageneDeviceProps {
   metrics: RideMetrics;
@@ -69,17 +70,6 @@ interface MageneDeviceProps {
   onToggleAutoCenter?: () => void;
   invertHeading?: boolean;
   onToggleInvertHeading?: () => void;
-}
-
-function formatClock12h(d: Date): string {
-  let h = d.getHours();
-  const m = d.getMinutes();
-  const s = d.getSeconds();
-  const ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12;
-  if (h === 0) h = 12;
-  const pad = (n: number) => n.toString().padStart(2, '0');
-  return `${h}:${pad(m)}:${pad(s)} ${ampm}`;
 }
 
 function formatClock24h(d: Date): string {
@@ -166,7 +156,6 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
     const id = window.setInterval(() => setCurrentDate(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
-  const clockStr = formatClock12h(currentDate);
   const clock24hStr = formatClock24h(currentDate);
   const dateWithYearStr = formatDateWithYear(currentDate);
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -214,9 +203,20 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
       ? routeAvgGradeRem
       : climbState.avgGradeRemaining;
 
+  const displayedElevation = (hasActiveRoute
+    ? getRouteElevation(routePoints, metrics.distanceTraveled, { lat: metrics.currentLat, lng: metrics.currentLng })
+    : null) ?? metrics.currentElevation;
+
   const nextTurnCue = getNextTurn(routeTurns, metrics.distanceTraveled);
   const formatTurnDist = (m: number) =>
     m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${m} m`;
+
+  // 3-Bar GPS Signal Meter:
+  // 3 bars: Strong strength (accuracy <= 2.5m or GPS 3D fallback)
+  // 2 bars: Moderate strength (2.5m < accuracy <= 5.0m or GPS 2D fallback)
+  // 1 bar:  Least strong strength (accuracy > 5.0m or Weak fallback)
+  // 0 bars: No fix / Searching
+  const { bars: gpsActiveBars, strength: gpsStrength, label: gpsLabel } = calculateGpsSignalBars(gpsStatus);
 
   return (
     <div className="w-full h-screen h-[100dvh] flex flex-col justify-between overflow-hidden bg-white select-none">
@@ -249,21 +249,80 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             </div>
           ) : null}
 
-          {/* GPS Quality Status */}
-          <span className={`flex items-center gap-1 font-bold ${
-            gpsStatus.quality === 'GPS 3D' ? 'text-emerald-600' :
-            gpsStatus.quality === 'GPS 2D' ? 'text-blue-600' :
-            gpsStatus.quality === 'Weak' ? 'text-amber-600' :
-            gpsStatus.quality === 'Searching...' ? 'text-amber-500 animate-pulse' :
-            'text-zinc-400'
-          }`}>
-            <Navigation className="w-3 h-3 fill-current" />
-            <span>{gpsStatus.quality === 'Weak' ? 'Weak' : gpsStatus.quality}</span>
-            {(gpsStatus.quality === 'Weak' || (gpsStatus.hasFix && gpsStatus.accuracy < 50)) &&
-              gpsStatus.accuracy > 0 && (
-              <span className="text-[10px] opacity-75 font-mono">({Math.round(gpsStatus.accuracy)}m)</span>
-            )}
-          </span>
+          {/* GPS Quality Status: 2D/3D + 3-Bar Signal Icon */}
+          <div
+            className={`flex items-center gap-1 font-bold ${
+              !gpsStatus.hasFix
+                ? 'text-zinc-400'
+                : gpsActiveBars === 1
+                ? 'text-amber-500'
+                : 'text-emerald-500'
+            }`}
+            title={
+              gpsStatus.hasFix
+                ? `GPS ${gpsLabel} • ${gpsStrength} (${gpsActiveBars}/3 bars${gpsStatus.accuracy > 0 ? `, ±${Math.round(gpsStatus.accuracy * 10) / 10}m` : ''})`
+                : 'Searching for GPS signal...'
+            }
+            aria-label={`GPS signal: ${gpsStrength} (${gpsActiveBars} of 3 bars)`}
+          >
+            <span className="font-sports font-bold text-[10px] tracking-wider uppercase">
+              {gpsLabel}
+            </span>
+            <svg
+              className={`w-3.5 h-3.5 shrink-0 ${!gpsStatus.hasFix && gpsStatus.quality === 'Searching...' ? 'animate-pulse' : ''}`}
+              viewBox="0 0 14 14"
+              fill="none"
+              aria-label={`GPS signal: ${gpsStrength} (${gpsActiveBars} of 3 bars)`}
+            >
+              {/* Bar 1: Shortest (height 4px) - 1 bar active is least strong */}
+              <rect
+                x="1"
+                y="9"
+                width="3"
+                height="4"
+                rx="0.75"
+                className={
+                  gpsActiveBars >= 1
+                    ? gpsActiveBars === 1
+                      ? 'fill-amber-500'
+                      : 'fill-emerald-500'
+                    : isDarkMode
+                    ? 'fill-zinc-700'
+                    : 'fill-zinc-300'
+                }
+              />
+              {/* Bar 2: Medium (height 7px) - 2 bars active is moderate */}
+              <rect
+                x="5.5"
+                y="6"
+                width="3"
+                height="7"
+                rx="0.75"
+                className={
+                  gpsActiveBars >= 2
+                    ? 'fill-emerald-500'
+                    : isDarkMode
+                    ? 'fill-zinc-700'
+                    : 'fill-zinc-300'
+                }
+              />
+              {/* Bar 3: Tallest (height 11px) - 3 bars filled is strong strength */}
+              <rect
+                x="10"
+                y="2"
+                width="3"
+                height="11"
+                rx="0.75"
+                className={
+                  gpsActiveBars >= 3
+                    ? 'fill-emerald-500'
+                    : isDarkMode
+                    ? 'fill-zinc-700'
+                    : 'fill-zinc-300'
+                }
+              />
+            </svg>
+          </div>
 
           {/* BLE Hardware Status Icon */}
           <button 
@@ -277,7 +336,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
           </button>
         </div>
 
-        {/* Page Switcher, Weather & live clock */}
+        {/* Weather, Dark/Night toggle & Page Switcher (Far Right) */}
         <div className="flex items-center gap-2">
           {!isOnline && (
             <span className="px-1.5 py-0.5 rounded text-[9px] font-sports font-bold tracking-wider uppercase bg-amber-500/20 text-amber-600 border border-amber-500/40">
@@ -299,24 +358,16 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             {isDarkMode ? <Sun className="w-3.5 h-3.5 text-amber-400" /> : <Moon className="w-3.5 h-3.5 text-zinc-500" />}
           </button>
 
-          <div className="flex items-center gap-1">
-            <button onClick={handlePrevPage} className="p-0.5 hover:text-blue-500">
+          {/* Page Switcher moved to far right */}
+          <div className="flex items-center gap-1 pl-1">
+            <button onClick={handlePrevPage} className="p-0.5 hover:text-blue-500" title="Previous page">
               <ChevronLeft className="w-3 h-3" />
             </button>
             <span className="font-sports font-bold text-[11px] text-zinc-500">P{currentPage}/5</span>
-            <button onClick={handleNextPage} className="p-0.5 hover:text-blue-500">
+            <button onClick={handleNextPage} className="p-0.5 hover:text-blue-500" title="Next page">
               <ChevronRight className="w-3 h-3" />
             </button>
           </div>
-
-          <span
-            className={`pl-1 font-digital font-bold text-[11px] tabular-nums whitespace-nowrap ${
-              isDarkMode ? 'text-zinc-200' : 'text-zinc-800'
-            }`}
-            title="Local time"
-          >
-            {clockStr}
-          </span>
         </div>
       </div>
 
@@ -489,7 +540,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                   <span className="text-[10px] font-sports text-zinc-400">m</span>
                 </div>
                 <span className="font-digital text-[32px] sm:text-[36px] font-bold leading-none mt-0.5">
-                  {Math.round(metrics.currentElevation)}
+                  {Math.round(displayedElevation)}
                 </span>
                 {/* Secondary metric: VAM */}
                 <span className="text-[10px] font-mono text-zinc-400 mt-1">
@@ -753,7 +804,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
               <div className="flex flex-col items-center">
                 <span className="text-[10px] font-sports font-bold text-zinc-400 uppercase">ELEVATION</span>
                 <span className="font-digital text-[24px] sm:text-[28px] font-bold leading-none mt-1">
-                  {Math.round(metrics.currentElevation)} <span className="text-xs text-zinc-400">m</span>
+                  {Math.round(displayedElevation)} <span className="text-xs text-zinc-400">m</span>
                 </span>
               </div>
             </div>

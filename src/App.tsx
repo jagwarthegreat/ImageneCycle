@@ -14,6 +14,7 @@ import { captureStravaRedirectTokens, isStravaConnected, startStravaConnect, cle
 import { loadUserRoutes, loadUserRoutesAsync, saveUserRoute, deleteUserRoute } from './utils/routeLibrary';
 import { OFFLINE_MAP_LABEL, probeOfflineMapAvailable } from './utils/offlineMap';
 import { freeRideClimbRecorder } from './utils/freeRideClimbRecorder';
+import { getRouteElevation, correctEllipsoidalAltitude, fetchDemElevation } from './utils/elevationService';
 import { MageneDevice } from './components/MageneDevice';
 import { BleSensorModal } from './components/BleSensorModal';
 import { ClimbManualInputModal } from './components/ClimbManualInputModal';
@@ -55,6 +56,25 @@ import {
   HardDrive
 } from 'lucide-react';
 
+interface MonotonicSessionBuffer {
+  id: string;
+  distanceMeters: number;
+  totalAscentMeters: number;
+  ridingTime: number;
+  saddleTime: number;
+  maxSpeedKmh: number;
+  avgSpeedKmh: number;
+  currentElevation: number;
+  currentGrade: number;
+  vam: number;
+  calories: number;
+  breadcrumbs: BreadcrumbPoint[];
+  routeName: string;
+  routeId: string;
+  startedAt: number;
+  status: 'recording' | 'paused' | 'completed';
+}
+
 export default function App() {
   // User routes (localStorage) + optional active planned course
   const [routes, setRoutes] = useState<RouteData[]>(() => loadUserRoutes());
@@ -85,6 +105,31 @@ export default function App() {
   // Active Activity Session State (Persisted in localStorage)
   // Idle on load: no auto-record. Orphan session → RESUME (paused), not recording.
   const [activeSession, setActiveSession] = useState<ActiveRideSession | null>(() => loadActiveSession());
+  const sessionBufferRef = useRef<MonotonicSessionBuffer | null>(null);
+  if (sessionBufferRef.current === null) {
+    const s = loadActiveSession();
+    if (s) {
+      sessionBufferRef.current = {
+        id: s.id,
+        distanceMeters: s.distanceMeters,
+        totalAscentMeters: s.totalAscentMeters,
+        ridingTime: s.ridingTime,
+        saddleTime: s.saddleTime,
+        maxSpeedKmh: s.maxSpeedKmh,
+        avgSpeedKmh: s.avgSpeedKmh,
+        currentElevation: s.currentElevation,
+        currentGrade: s.currentGrade,
+        vam: s.vam,
+        calories: s.calories,
+        breadcrumbs: s.breadcrumbs || [],
+        routeName: s.routeName,
+        routeId: s.routeId,
+        startedAt: s.startedAt,
+        status: s.status
+      };
+      gpsService.setTrackingSessionId(s.id);
+    }
+  }
   const [ridingTime, setRidingTime] = useState<number>(() => {
     const s = loadActiveSession();
     return s ? s.ridingTime : 0;
@@ -111,7 +156,19 @@ export default function App() {
     const s = loadActiveSession();
     return s ? s.maxSpeedKmh : 0;
   });
-  const [currentElevation, setCurrentElevation] = useState<number>(0);
+  const [currentElevation, setCurrentElevation] = useState<number>(() => {
+    const s = loadActiveSession();
+    return s ? s.currentElevation : 0;
+  });
+
+  // Lock initial elevation to active route starting elevation
+  useEffect(() => {
+    if (activeRoute && activeRoute.points && activeRoute.points.length > 0) {
+      const startEle = activeRoute.points[0].ele;
+      setCurrentElevation(Math.round(startEle));
+      lastAltRef.current = startEle;
+    }
+  }, [selectedRouteId, activeRoute]);
   const [totalAscent, setTotalAscent] = useState<number>(() => {
     const s = loadActiveSession();
     return s ? s.totalAscentMeters : 0;
@@ -283,7 +340,7 @@ export default function App() {
   const [isResumePrompt, setIsResumePrompt] = useState<boolean>(false);
   const lastPromptDismissedAtRef = useRef<number>(0);
   const prevClimbInRef = useRef<boolean>(false);
-  const lastAltRef = useRef<number>(187);
+  const lastAltRef = useRef<number | null>(null);
   const selectedRouteIdRef = useRef<string | null>(selectedRouteId);
   selectedRouteIdRef.current = selectedRouteId;
   const distanceTraveledRef = useRef(distanceTraveled);
@@ -300,6 +357,16 @@ export default function App() {
   cadenceRef.current = cadence;
   const heartRateRef = useRef<number | null>(heartRate);
   heartRateRef.current = heartRate;
+  const totalAscentRef = useRef<number>(totalAscent);
+  totalAscentRef.current = totalAscent;
+  const autoResumeOrStartRef = useRef<() => void>(() => {});
+
+  // Maintain persistent event listeners for movement detection that survive long rides
+  useEffect(() => {
+    gpsService.setOnMovementDetected((_speedKmh) => {
+      autoResumeOrStartRef.current();
+    });
+  }, []);
 
   // Sound sync
   useEffect(() => {
@@ -408,7 +475,16 @@ export default function App() {
         try {
           localStorage.setItem('magene-last-known-gps', JSON.stringify(coords));
         } catch {}
-        if (altitude && altitude > 0) setCurrentElevation(Math.round(altitude));
+        if (altitude && altitude > 0) {
+          const msl = correctEllipsoidalAltitude(latitude, longitude, altitude);
+          if (msl > 0) setCurrentElevation(Math.round(msl));
+        }
+        void fetchDemElevation(latitude, longitude).then(demEle => {
+          if (demEle !== null && !selectedRouteIdRef.current) {
+            setCurrentElevation(Math.round(demEle));
+            if (lastAltRef.current === null) lastAltRef.current = demEle;
+          }
+        });
         if (heading != null && !isNaN(heading)) setCurrentHeading(heading);
         const acc = accuracy || 999;
         setGpsStatus(prev => {
@@ -479,7 +555,14 @@ export default function App() {
         // Weak / display-only: update map puck + HUD only
         if (fix.displayOnly) {
           if (fix.heading) setCurrentHeading(fix.heading);
-          if (fix.altitude > 0) setCurrentElevation(Math.round(fix.altitude));
+          if (fix.altitude > 0) {
+            let ele = fix.altitude;
+            if (activeRoute && activeRoute.points?.length) {
+              const rEle = getRouteElevation(activeRoute.points, distanceTraveledRef.current, { lat: fix.lat, lng: fix.lng });
+              if (rEle !== null) ele = rEle;
+            }
+            setCurrentElevation(Math.round(ele));
+          }
           return;
         }
 
@@ -495,56 +578,99 @@ export default function App() {
           }
         }
 
-        // Auto-start / Resume prompt on movement (>= 2.0 km/h)
-        const now = Date.now();
+        // Auto-resume or auto-start on movement (>= 2.0 km/h) without prompting
         const isNotActive = !isRecordingRef.current || isPausedRef.current;
         if (isNotActive && fix.speedKmh >= 2.0) {
-          if (now - lastPromptDismissedAtRef.current > 45000) {
-            const willResume = Boolean(activeSessionRef.current || isPausedRef.current);
-            setIsResumePrompt(willResume);
-            setShowStartPrompt(true);
-          }
+          autoResumeOrStartRef.current();
         }
 
-        // Record live path breadcrumb if recording and moving
+        // Verify activity session identification against current tracking state
+        const curSessionId = activeSessionRef.current?.id;
+        const trackingSessionId = gpsService.getTrackingSessionId();
+        const isSessionValid = Boolean(curSessionId && trackingSessionId === curSessionId);
+
+        // Record live path breadcrumb if recording, moving, and session is valid
         let nextDist = distanceTraveledRef.current;
-        if (isRecordingRef.current && !isPausedRef.current && deltaDist > 0) {
+        if (isRecordingRef.current && !isPausedRef.current && deltaDist > 0 && isSessionValid) {
           nextDist = distanceTraveledRef.current + deltaDist;
           distanceTraveledRef.current = nextDist;
-          setLiveBreadcrumbs(prev => [
-            ...prev,
-            {
-              lat: fix.lat,
-              lng: fix.lng,
-              ele: fix.altitude > 0 ? fix.altitude : undefined,
-              time: Date.now(),
-              speed: fix.speedKmh,
-              power: powerRef.current ?? undefined,
-              cadence: cadenceRef.current ?? undefined,
-              heartRate: heartRateRef.current ?? undefined,
-              distance: nextDist
-            }
-          ]);
+          const newBreadcrumb: BreadcrumbPoint = {
+            lat: fix.lat,
+            lng: fix.lng,
+            ele: fix.altitude > 0 ? fix.altitude : undefined,
+            time: Date.now(),
+            speed: fix.speedKmh,
+            power: powerRef.current ?? undefined,
+            cadence: cadenceRef.current ?? undefined,
+            heartRate: heartRateRef.current ?? undefined,
+            distance: nextDist
+          };
+
+          if (sessionBufferRef.current && sessionBufferRef.current.id === curSessionId) {
+            sessionBufferRef.current.distanceMeters = Math.max(sessionBufferRef.current.distanceMeters, nextDist);
+            sessionBufferRef.current.breadcrumbs.push(newBreadcrumb);
+            sessionBufferRef.current.maxSpeedKmh = Math.max(sessionBufferRef.current.maxSpeedKmh, fix.speedKmh);
+            setLiveBreadcrumbs(sessionBufferRef.current.breadcrumbs.slice());
+          } else {
+            setLiveBreadcrumbs(prev => [...prev, newBreadcrumb]);
+          }
           setDistanceTraveled(nextDist);
         }
 
         // Elevation and smoothed grade
-        if (fix.altitude > 0) {
-          setCurrentElevation(Math.round(fix.altitude));
-          if (isRecordingRef.current && !isPausedRef.current && fix.altitude > lastAltRef.current) {
-            setTotalAscent(prev => prev + (fix.altitude - lastAltRef.current));
+        let nextEle = fix.altitude;
+        if (activeRoute && activeRoute.points?.length) {
+          const routeEle = getRouteElevation(activeRoute.points, distanceTraveledRef.current, { lat: fix.lat, lng: fix.lng });
+          if (routeEle !== null) {
+            nextEle = routeEle;
           }
-          lastAltRef.current = fix.altitude;
+        } else if (fix.lat && fix.lng) {
+          // In Free Ride, check DEM cache/fetch for ground truth calibration
+          void fetchDemElevation(fix.lat, fix.lng).then(demEle => {
+            if (demEle !== null && !selectedRouteIdRef.current && (!isRecordingRef.current || isPausedRef.current)) {
+              setCurrentElevation(Math.round(demEle));
+            }
+          });
+        }
+
+        if (nextEle > 0) {
+          const roundedEle = Math.round(nextEle);
+          setCurrentElevation(roundedEle);
+          if (sessionBufferRef.current && curSessionId && sessionBufferRef.current.id === curSessionId) {
+            sessionBufferRef.current.currentElevation = roundedEle;
+          }
+          if (isRecordingRef.current && !isPausedRef.current && isSessionValid) {
+            if (lastAltRef.current !== null && roundedEle > lastAltRef.current) {
+              const diff = roundedEle - lastAltRef.current;
+              if (diff >= 1) {
+                setTotalAscent(prev => {
+                  const nextTotal = prev + diff;
+                  totalAscentRef.current = nextTotal;
+                  if (sessionBufferRef.current && sessionBufferRef.current.id === curSessionId) {
+                    sessionBufferRef.current.totalAscentMeters = Math.max(sessionBufferRef.current.totalAscentMeters, nextTotal);
+                  }
+                  return nextTotal;
+                });
+              }
+            }
+            lastAltRef.current = roundedEle;
+          } else {
+            lastAltRef.current = roundedEle;
+          }
         }
 
         setCurrentGrade(instantGrade);
+        if (sessionBufferRef.current && curSessionId && sessionBufferRef.current.id === curSessionId) {
+          sessionBufferRef.current.currentGrade = instantGrade;
+          sessionBufferRef.current.vam = fix.vam ?? gpsService.getSlidingVam();
+        }
 
         // Free Ride ClimbPro recording (no planned route)
-        if (isRecordingRef.current && !isPausedRef.current && !selectedRouteIdRef.current && deltaDist > 0) {
+        if (isRecordingRef.current && !isPausedRef.current && !selectedRouteIdRef.current && deltaDist > 0 && isSessionValid) {
           freeRideClimbRecorder.pushSample(
             fix.lat,
             fix.lng,
-            fix.altitude > 0 ? fix.altitude : lastAltRef.current,
+            fix.altitude > 0 ? fix.altitude : (lastAltRef.current ?? 0),
             nextDist,
             instantGrade
           );
@@ -582,7 +708,7 @@ export default function App() {
     }
 
     return () => {
-      gpsService.stopTracking();
+      gpsService.stopTracking(false, false);
     };
   }, [bleStatus.cscConnected, batterySaver]);
 
@@ -607,9 +733,27 @@ export default function App() {
     if (!isRecording) return;
 
     const timer = setInterval(() => {
-      setSaddleTime(prev => prev + 1);
+      setSaddleTime(prev => {
+        const next = prev + 1;
+        if (sessionBufferRef.current && sessionBufferRef.current.id === activeSessionRef.current?.id) {
+          sessionBufferRef.current.saddleTime = Math.max(sessionBufferRef.current.saddleTime, next);
+        }
+        return next;
+      });
+
       if (!isPaused) {
-        setRidingTime(prev => prev + 1);
+        setRidingTime(prev => {
+          const next = prev + 1;
+          if (sessionBufferRef.current && sessionBufferRef.current.id === activeSessionRef.current?.id) {
+            sessionBufferRef.current.ridingTime = Math.max(sessionBufferRef.current.ridingTime, next);
+            if (next > 0) {
+              const curDist = sessionBufferRef.current.distanceMeters;
+              sessionBufferRef.current.avgSpeedKmh = Math.round(((curDist / 1000) / (next / 3600)) * 10) / 10;
+              sessionBufferRef.current.calories = Math.round(next * 0.2);
+            }
+          }
+          return next;
+        });
         setTimeElapsed(prev => prev + 1);
       }
     }, 1000);
@@ -658,44 +802,61 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [latestLapAlert]);
 
-  // Continuous Auto-Save to LocalStorage every 5 seconds
+  // Continuous Auto-Save to LocalStorage every 5 seconds using monotonic ref buffer
+  // Note: Dependency array depends strictly on activeSession ID and run state, avoiding teardown/reset on GPS fixes
   useEffect(() => {
-    if (!activeSession || !isRecording) return;
+    if (!activeSession?.id || !isRecording) return;
 
     const interval = setInterval(() => {
+      const buf = sessionBufferRef.current;
+      const targetSessionId = activeSession.id;
+      if (!buf || buf.id !== targetSessionId) return;
+
       const updated: ActiveRideSession = {
-        ...activeSession,
-        ridingTime,
-        saddleTime,
-        distanceMeters: distanceTraveled,
-        totalAscentMeters: totalAscent,
-        maxSpeedKmh: maxSpeed,
-        avgSpeedKmh: metrics.avgSpeed,
-        currentElevation,
-        currentGrade,
-        vam: metrics.vam,
-        calories: metrics.calories,
-        breadcrumbs: liveBreadcrumbs,
+        id: buf.id,
+        startedAt: buf.startedAt,
         updatedAt: Date.now(),
-        status: isPaused ? 'paused' : 'recording'
+        status: isPaused ? 'paused' : 'recording',
+        routeName: buf.routeName,
+        routeId: buf.routeId,
+        ridingTime: buf.ridingTime,
+        saddleTime: buf.saddleTime,
+        distanceMeters: buf.distanceMeters,
+        totalAscentMeters: buf.totalAscentMeters,
+        maxSpeedKmh: buf.maxSpeedKmh,
+        avgSpeedKmh: buf.avgSpeedKmh,
+        currentElevation: buf.currentElevation,
+        currentGrade: buf.currentGrade,
+        vam: buf.vam,
+        calories: buf.calories,
+        breadcrumbs: buf.breadcrumbs
       };
       saveActiveSession(updated);
     }, 5000);
 
     return () => clearInterval(interval);
-  }, [activeSession, isRecording, isPaused, ridingTime, saddleTime, distanceTraveled, totalAscent, maxSpeed, currentElevation, currentGrade, liveBreadcrumbs]);
+  }, [activeSession?.id, isRecording, isPaused]);
 
-  // Current RoutePoint: ALWAYS reflects the rider's true live GPS coordinates
+  // Derived effective elevation: accurately locked to active route profile when navigating course, else calibrated GPS/DEM
+  const effectiveElevation = useMemo<number>(() => {
+    if (activeRoute && activeRoute.points && activeRoute.points.length > 0) {
+      const routeEle = getRouteElevation(activeRoute.points, distanceTraveled, currentCoords);
+      if (routeEle !== null) return Math.round(routeEle);
+    }
+    return Math.round(currentElevation);
+  }, [activeRoute, distanceTraveled, currentCoords, currentElevation]);
+
+  // Current RoutePoint: ALWAYS reflects the rider's true live GPS coordinates and effective elevation
   const currentPoint = useMemo<RoutePoint>(() => {
     return {
       lat: currentCoords.lat,
       lng: currentCoords.lng,
-      ele: currentElevation,
+      ele: effectiveElevation,
       distFromStart: distanceTraveled,
       grade: currentGrade,
       heading: currentHeading
     };
-  }, [currentCoords, currentElevation, distanceTraveled, currentGrade, currentHeading]);
+  }, [currentCoords, effectiveElevation, distanceTraveled, currentGrade, currentHeading]);
 
   // ClimbPro Live Calculation (planned route vs free-ride recorder)
   const climbState = useMemo(() => {
@@ -703,12 +864,12 @@ export default function App() {
       return calculateClimbProLiveState(
         distanceTraveled,
         activeRoute.climbs,
-        currentElevation,
+        effectiveElevation,
         currentGrade
       );
     }
-    return freeRideClimbRecorder.toClimbProState(currentElevation, currentGrade);
-  }, [distanceTraveled, activeRoute, currentElevation, currentGrade, freeClimbTick]);
+    return freeRideClimbRecorder.toClimbProState(effectiveElevation, currentGrade);
+  }, [distanceTraveled, activeRoute, effectiveElevation, currentGrade, freeClimbTick]);
 
   // Chimes
   useEffect(() => {
@@ -744,7 +905,7 @@ export default function App() {
       speed,
       avgSpeed: Math.round(avgSpeed * 10) / 10,
       maxSpeed: Math.round(maxSpeed * 10) / 10,
-      currentElevation,
+      currentElevation: effectiveElevation,
       totalAscent: Math.round(totalAscent),
       currentGrade,
       heartRate,
@@ -791,6 +952,27 @@ export default function App() {
       breadcrumbs: []
     };
 
+    // Initialize monotonic buffer and GPS tracking session identification
+    sessionBufferRef.current = {
+      id: newSession.id,
+      distanceMeters: 0,
+      totalAscentMeters: 0,
+      ridingTime: 0,
+      saddleTime: 0,
+      maxSpeedKmh: 0,
+      avgSpeedKmh: 0,
+      currentElevation,
+      currentGrade: 0,
+      vam: 0,
+      calories: 0,
+      breadcrumbs: [],
+      routeName: newSession.routeName,
+      routeId: newSession.routeId,
+      startedAt: newSession.startedAt,
+      status: 'recording'
+    };
+    gpsService.setTrackingSessionId(newSession.id);
+
     saveActiveSession(newSession);
     setActiveSession(newSession);
     setIsRecording(true);
@@ -813,6 +995,36 @@ export default function App() {
     bikeBeeper.beep(2600, 0.12);
   };
 
+  // Auto-resume or start on detected movement without prompting
+  const handleAutoResumeOrStart = () => {
+    if (isRecordingRef.current && !isPausedRef.current) {
+      return;
+    }
+    if (activeSessionRef.current || isPausedRef.current) {
+      setIsRecording(true);
+      setIsPaused(false);
+      setIsAutoPaused(false);
+      setShowStartPrompt(false);
+      if (activeSessionRef.current) {
+        gpsService.setTrackingSessionId(activeSessionRef.current.id);
+        if (sessionBufferRef.current) {
+          sessionBufferRef.current.status = 'recording';
+        }
+        const resumed: ActiveRideSession = {
+          ...activeSessionRef.current,
+          status: 'recording',
+          updatedAt: Date.now()
+        };
+        setActiveSession(resumed);
+        saveActiveSession(resumed);
+      }
+      bikeBeeper.beep(2600, 0.08);
+    } else if (!isRecordingRef.current && !activeSessionRef.current) {
+      handleStartNewActivity();
+    }
+  };
+  autoResumeOrStartRef.current = handleAutoResumeOrStart;
+
   // Actions
   const handleToggleStartPause = () => {
     // Idle → create session and record
@@ -826,6 +1038,10 @@ export default function App() {
       setIsRecording(true);
       setIsPaused(false);
       setIsAutoPaused(false);
+      gpsService.setTrackingSessionId(activeSession.id);
+      if (sessionBufferRef.current) {
+        sessionBufferRef.current.status = 'recording';
+      }
       const resumed = {
         ...activeSession,
         status: 'recording' as const,
@@ -839,6 +1055,9 @@ export default function App() {
 
     // Recording → pause
     setIsPaused(true);
+    if (sessionBufferRef.current) {
+      sessionBufferRef.current.status = 'paused';
+    }
     bikeBeeper.beep(1800, 0.08);
     const paused = {
       ...activeSession,
@@ -902,6 +1121,8 @@ export default function App() {
 
     clearActiveSession();
     setActiveSession(null);
+    gpsService.setTrackingSessionId(null);
+    sessionBufferRef.current = null;
     setIsRecording(false);
     setIsPaused(false);
     setIsAutoPaused(false);
@@ -925,12 +1146,20 @@ export default function App() {
     setIsRideSummaryOpen(false);
     setIsPaused(false);
     setIsAutoPaused(false);
+    if (activeSession) {
+      gpsService.setTrackingSessionId(activeSession.id);
+      if (sessionBufferRef.current) {
+        sessionBufferRef.current.status = 'recording';
+      }
+    }
     bikeBeeper.beep(2600, 0.08);
   };
 
   const handleDiscardActivity = () => {
     clearActiveSession();
     setActiveSession(null);
+    gpsService.setTrackingSessionId(null);
+    sessionBufferRef.current = null;
     setIsRecording(false);
     setIsPaused(false);
     setIsAutoPaused(false);
@@ -967,6 +1196,8 @@ export default function App() {
     setLapCount(0);
     setLatestLapAlert(null);
     gpsService.resetDistance();
+    gpsService.setTrackingSessionId(null);
+    sessionBufferRef.current = null;
     bikeBeeper.beep(2000, 0.05);
   };
 

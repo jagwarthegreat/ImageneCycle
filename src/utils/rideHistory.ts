@@ -28,6 +28,35 @@ export function loadActiveSession(): ActiveRideSession | null {
 export function saveActiveSession(session: ActiveRideSession): void {
   if (typeof window === 'undefined') return;
   try {
+    const existingRaw = localStorage.getItem(ACTIVE_SESSION_KEY);
+    if (existingRaw) {
+      try {
+        const existing: ActiveRideSession = JSON.parse(existingRaw);
+        // If saving the same active session ID, ensure monotonic protection against high-frequency overwrites
+        if (existing && existing.id === session.id) {
+          const incomingBreadcrumbs = session.breadcrumbs || [];
+          const existingBreadcrumbs = existing.breadcrumbs || [];
+          const safeBreadcrumbs =
+            incomingBreadcrumbs.length >= existingBreadcrumbs.length
+              ? incomingBreadcrumbs
+              : existingBreadcrumbs;
+
+          const protectedSession: ActiveRideSession = {
+            ...session,
+            distanceMeters: Math.max(session.distanceMeters ?? 0, existing.distanceMeters ?? 0),
+            totalAscentMeters: Math.max(session.totalAscentMeters ?? 0, existing.totalAscentMeters ?? 0),
+            ridingTime: Math.max(session.ridingTime ?? 0, existing.ridingTime ?? 0),
+            saddleTime: Math.max(session.saddleTime ?? 0, existing.saddleTime ?? 0),
+            maxSpeedKmh: Math.max(session.maxSpeedKmh ?? 0, existing.maxSpeedKmh ?? 0),
+            breadcrumbs: safeBreadcrumbs
+          };
+          localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(protectedSession));
+          return;
+        }
+      } catch {
+        // Fallback to saving session directly if JSON parsing fails
+      }
+    }
     localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(session));
   } catch (err) {
     console.error('Failed to save active session:', err);

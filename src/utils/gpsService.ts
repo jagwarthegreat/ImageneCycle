@@ -24,6 +24,8 @@ export interface GpsTrackingOptions {
   batterySaver?: boolean;
 }
 
+import { correctEllipsoidalAltitude } from './elevationService';
+
 export function haversineDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000; // Earth radius in meters
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -102,6 +104,13 @@ class GpsService {
   private headingHistory: number[] = [];
   private lastKnownHeading: number = 0;
 
+  // Active activity session identification
+  private currentTrackingSessionId: string | null = null;
+
+  // Persistent Movement Detection for long rides
+  private onMovementDetectedCb: ((speedKmh: number) => void) | null = null;
+  private persistentMotionListenerAttached = false;
+
   // Auto-Pause state & timer
   private lowSpeedStartTime: number | null = null;
   private isAutoPaused: boolean = false;
@@ -118,6 +127,53 @@ class GpsService {
 
   public getSlidingVam(): number {
     return this.slidingVam;
+  }
+
+  public setTrackingSessionId(id: string | null): void {
+    this.currentTrackingSessionId = id;
+  }
+
+  public getTrackingSessionId(): string | null {
+    return this.currentTrackingSessionId;
+  }
+
+  public isSessionValid(activeSessionId: string | null): boolean {
+    if (!this.currentTrackingSessionId || !activeSessionId) return false;
+    return this.currentTrackingSessionId === activeSessionId;
+  }
+
+  public setOnMovementDetected(cb: ((speedKmh: number) => void) | null): void {
+    this.onMovementDetectedCb = cb;
+    this.initPersistentMovementListener();
+  }
+
+  /**
+   * Maintains persistent event listeners for movement detection that are not prone
+   * to being garbage collected during long rides or component unmounts.
+   */
+  private initPersistentMovementListener(): void {
+    if (typeof window === 'undefined') return;
+    if (this.persistentMotionListenerAttached) return;
+    this.persistentMotionListenerAttached = true;
+
+    try {
+      const handleDeviceMotion = (event: DeviceMotionEvent) => {
+        const acc = event.acceleration || event.accelerationIncludingGravity;
+        if (acc) {
+          const x = acc.x ?? 0;
+          const y = acc.y ?? 0;
+          const z = acc.z ?? 0;
+          const mag = Math.sqrt(x * x + y * y + z * z);
+          // If significant user acceleration is detected (over background gravity vibration)
+          if ((event.acceleration && mag > 1.2) || mag > 12.5) {
+            this.onMovementDetectedCb?.(2.0);
+          }
+        }
+      };
+      window.addEventListener('devicemotion', handleDeviceMotion, { passive: true });
+    } catch {
+      // Browser or device does not permit devicemotion; GPS-based velocity acts as reliable fallback
+    }
   }
 
   private geoOptions(maxAge: number): PositionOptions {
@@ -214,7 +270,8 @@ class GpsService {
     const now = pos.timestamp;
     const lat = coords.latitude;
     const lng = coords.longitude;
-    const alt = coords.altitude ?? 0;
+    const rawAlt = coords.altitude ?? 0;
+    const alt = rawAlt > 0 ? correctEllipsoidalAltitude(lat, lng, rawAlt) : 0;
     const acc = coords.accuracy ?? 999;
 
     // Warm-up: need a decent fix before accepting tracking; then allow slightly looser
@@ -303,6 +360,11 @@ class GpsService {
       }
     }
 
+    // Check for sustained movement detection to wake or resume rides
+    if (speedKmh >= 2.0 || deltaDist >= 1.5) {
+      this.onMovementDetectedCb?.(speedKmh);
+    }
+
     this.altitudeHistory.push({ alt, dist: this.accumulatedDistMeters });
     if (this.altitudeHistory.length > 8) {
       this.altitudeHistory.shift();
@@ -354,7 +416,7 @@ class GpsService {
     this.onErrorCb?.(msg);
   }
 
-  public stopTracking(resetLock = true) {
+  public stopTracking(resetLock = true, clearSession = false) {
     if (this.watchId !== null) {
       navigator.geolocation.clearWatch(this.watchId);
       this.watchId = null;
@@ -371,6 +433,9 @@ class GpsService {
     this.isAutoPaused = false;
     if (resetLock) {
       this.hasGoodLock = false;
+    }
+    if (clearSession) {
+      this.currentTrackingSessionId = null;
     }
     this.onFixCb = null;
     this.onErrorCb = null;
