@@ -42,6 +42,20 @@ export function clearStravaTokens() {
   } catch {}
 }
 
+export function setManualStravaToken(token: string) {
+  const clean = token.trim();
+  if (!clean) return;
+  saveStravaTokens({
+    accessToken: clean,
+    refreshToken: '',
+    expiresAt: Math.floor(Date.now() / 1000) + 86400 * 30 // 30 days validity
+  });
+}
+
+export function getStoredStravaToken(): string | null {
+  return loadStravaTokens()?.accessToken || null;
+}
+
 /** Capture tokens from OAuth redirect hash (?strava=connected#access_token=...) */
 export function captureStravaRedirectTokens(): boolean {
   if (typeof window === 'undefined') return false;

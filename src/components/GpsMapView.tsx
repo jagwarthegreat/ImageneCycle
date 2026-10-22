@@ -5,7 +5,7 @@ import { leafletLayer } from 'protomaps-leaflet';
 import { RoutePoint } from '../types/cycling';
 import { createCachedTileLayer } from '../utils/tileCache';
 import { resolveActiveBasemap } from '../utils/mapPacks';
-import { Crosshair, Map as MapIcon, Compass as CompassIcon, MapPin } from 'lucide-react';
+import { Map as MapIcon, MapPin } from 'lucide-react';
 
 function attachWorldOverview(map: L.Map, isDarkMode: boolean): L.Layer {
   // World overview — not a country offline pack (needs network). No country roads from app bundle.
@@ -67,6 +67,10 @@ interface GpsMapViewProps {
   fitRouteToken?: number;
   /** Increment after map pack download/delete to reload basemap */
   basemapToken?: number;
+  autoCenter?: boolean;
+  onToggleAutoCenter?: () => void;
+  invertHeading?: boolean;
+  onToggleInvertHeading?: () => void;
 }
 
 export const GpsMapView: React.FC<GpsMapViewProps> = ({
@@ -79,7 +83,11 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   onLocateMe,
   batterySaver = false,
   fitRouteToken = 0,
-  basemapToken = 0
+  basemapToken = 0,
+  autoCenter: propAutoCenter,
+  onToggleAutoCenter,
+  invertHeading: propInvertHeading,
+  onToggleInvertHeading
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -100,8 +108,49 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   batterySaverRef.current = batterySaver;
 
   // Map Navigation Modes (Matching real-world Magene C706 behavior)
-  const [autoCenter, setAutoCenter] = useState<boolean>(true);
+  const [internalAutoCenter, setInternalAutoCenter] = useState<boolean>(true);
+  const autoCenter = propAutoCenter !== undefined ? propAutoCenter : internalAutoCenter;
+  const onToggleAutoCenterRef = useRef(onToggleAutoCenter);
+  onToggleAutoCenterRef.current = onToggleAutoCenter;
+  const autoCenterRef = useRef(autoCenter);
+  autoCenterRef.current = autoCenter;
+
+  const setAutoCenterState = (val: boolean) => {
+    if (val !== autoCenterRef.current) {
+      if (onToggleAutoCenterRef.current) {
+        onToggleAutoCenterRef.current();
+      } else {
+        setInternalAutoCenter(val);
+      }
+    }
+  };
+
   const [headingUpMode, setHeadingUpMode] = useState<boolean>(true); // Default: Heading-Up / Course-Up
+  const [internalInvertHeading, setInternalInvertHeading] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem('magene-invert-heading') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const invertHeading = propInvertHeading !== undefined ? propInvertHeading : internalInvertHeading;
+
+  const handleToggleInvertHeading = () => {
+    if (onToggleInvertHeading) {
+      onToggleInvertHeading();
+      return;
+    }
+    setInternalInvertHeading(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('magene-invert-heading', String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const effectiveHeading = ((heading || 0) + (invertHeading ? 180 : 0)) % 360;
 
   // Initialize Leaflet Map
   useEffect(() => {
@@ -126,7 +175,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
 
       // User manual drag pauses auto-center temporarily
       map.on('dragstart', () => {
-        setAutoCenter(false);
+        setAutoCenterState(false);
       });
 
       // Layer groups for markers & chevrons
@@ -176,7 +225,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
           <div style="position: relative; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;">
             ${pingHtml}
             <div style="width: 26px; height: 26px; border-radius: 50%; background: #ffffff; box-shadow: 0 2px 6px rgba(0,0,0,0.35); border: 2.5px solid #2563eb; display: flex; align-items: center; justify-content: center;">
-              <svg id="gps-heading-needle" style="width: 15px; height: 15px; color: #2563eb; transform: rotate(0deg); transition: transform 0.15s linear;" viewBox="0 0 24 24" fill="currentColor">
+              <svg class="gps-heading-needle" style="width: 15px; height: 15px; color: #2563eb; transform: rotate(0deg); transition: transform 0.15s linear;" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z" />
               </svg>
             </div>
@@ -227,13 +276,29 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     };
   }, []);
 
+  const lastBasemapParamsRef = useRef<{ isDark: boolean; token: number; lat: number; lng: number } | null>(null);
+
   // Swap day/night / pack basemap (PMTiles flavor or raster URL)
+  // Only re-attach when dark mode, map token, or region genuinely changes — NOT on every raw coordinate tick!
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
-    let cancelled = false;
+
     const lat = currentPoint.lat || 14.5995;
     const lng = currentPoint.lng || 120.9842;
+    const prev = lastBasemapParamsRef.current;
+
+    const needsUpdate =
+      !prev ||
+      prev.isDark !== isDarkMode ||
+      prev.token !== basemapToken ||
+      Math.abs(prev.lat - lat) > 0.5 ||
+      Math.abs(prev.lng - lng) > 0.5;
+
+    if (!needsUpdate) return;
+    lastBasemapParamsRef.current = { isDark: isDarkMode, token: basemapToken, lat, lng };
+
+    let cancelled = false;
     void attachBasemap(map, isDarkMode, lat, lng).then(({ layer, offline, packName, error }) => {
       if (cancelled || mapInstanceRef.current !== map) {
         map.removeLayer(layer);
@@ -336,7 +401,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     const line = polylineCoreRef.current;
     const timer = window.setTimeout(() => {
       try {
-        setAutoCenter(false);
+        setAutoCenterState(false);
         if (!line.getLatLngs() || (line.getLatLngs() as unknown[]).length < 2) return;
         map.fitBounds(line.getBounds(), {
           padding: [25, 25],
@@ -382,10 +447,10 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         markerRef.current.setLatLng([lat, lng]);
 
         // In Heading-Up mode, the map rotates underneath the rider, so the rider arrow points straight UP (0deg)!
-        // In North-Up mode, the map is static, so the arrow rotates by heading!
-        const needle = document.getElementById('gps-heading-needle');
+        // In North-Up mode, the map is static, so the arrow rotates by effectiveHeading!
+        const needle = mapContainerRef.current?.querySelector('.gps-heading-needle') as HTMLElement | null;
         if (needle) {
-          needle.style.transform = headingUpMode ? 'rotate(0deg)' : `rotate(${heading}deg)`;
+          needle.style.transform = headingUpMode ? 'rotate(0deg)' : `rotate(${effectiveHeading}deg)`;
         }
 
         // On first valid fix, center with zoom 16
@@ -400,18 +465,21 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         }
       }
     }
-  }, [currentPoint.lat, currentPoint.lng, heading, autoCenter, headingUpMode, batterySaver]);
+  }, [currentPoint.lat, currentPoint.lng, effectiveHeading, autoCenter, headingUpMode, batterySaver]);
+
+  // Sync when autoCenter becomes true
+  useEffect(() => {
+    if (autoCenter && mapInstanceRef.current && currentPoint.lat && currentPoint.lng) {
+      mapInstanceRef.current.setView([currentPoint.lat, currentPoint.lng], 16, { animate: !batterySaver });
+    }
+  }, [autoCenter]);
 
   // Toggle Auto-Center
   const handleToggleAutoCenter = () => {
-    const next = !autoCenter;
-    setAutoCenter(next);
-    if (next && mapInstanceRef.current) {
-      const lat = currentPoint.lat;
-      const lng = currentPoint.lng;
-      if (lat && lng) {
-        mapInstanceRef.current.setView([lat, lng], 16, { animate: !batterySaver });
-      }
+    if (onToggleAutoCenter) {
+      onToggleAutoCenter();
+    } else {
+      setInternalAutoCenter(prev => !prev);
     }
   };
 
@@ -421,7 +489,11 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   };
 
   const handleFitRoute = () => {
-    setAutoCenter(false);
+    if (onToggleAutoCenter && autoCenter) {
+      onToggleAutoCenter();
+    } else {
+      setInternalAutoCenter(false);
+    }
     if (mapInstanceRef.current && polylineCoreRef.current && routePoints && routePoints.length > 1) {
       mapInstanceRef.current.fitBounds(polylineCoreRef.current.getBounds(), {
         padding: [25, 25],
@@ -432,7 +504,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   };
 
   const handleLocateMe = () => {
-    setAutoCenter(true);
+    setAutoCenterState(true);
     if (mapInstanceRef.current && currentPoint.lat && currentPoint.lng) {
       mapInstanceRef.current.setView([currentPoint.lat, currentPoint.lng], 16, { animate: !batterySaver });
     }
@@ -446,7 +518,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       <div
         className={`w-[160%] h-[160%] -left-[30%] -top-[30%] absolute ${batterySaver ? '' : 'transition-transform duration-300 ease-out'}`}
         style={{
-          transform: headingUpMode ? `rotate(${-heading}deg)` : 'rotate(0deg)',
+          transform: headingUpMode ? `rotate(${-effectiveHeading}deg)` : 'rotate(0deg)',
           transformOrigin: 'center center'
         }}
       >
@@ -509,10 +581,10 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
           className="relative w-10 h-10 rounded-full bg-zinc-900/95 shadow-lg border-2 border-white flex items-center justify-center backdrop-blur-xs active:scale-95 transition-transform"
           title={headingUpMode ? 'Heading Up (Tap for North Up)' : 'North Up (Tap for Heading Up)'}
         >
-          {/* Compass Needle: in Heading-Up mode, points to magnetic North relative to heading */}
+          {/* Compass Needle: in Heading-Up mode, points to magnetic North relative to effectiveHeading */}
           <div
             className="w-full h-full flex flex-col items-center justify-center transition-transform duration-300"
-            style={{ transform: headingUpMode ? `rotate(${-heading}deg)` : 'rotate(0deg)' }}
+            style={{ transform: headingUpMode ? `rotate(${-effectiveHeading}deg)` : 'rotate(0deg)' }}
           >
             {/* North Point (Red) */}
             <div className="w-0 h-0 border-x-3.5 border-x-transparent border-b-[8px] border-b-red-500" />
@@ -528,21 +600,8 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         </span>
       </div>
 
-      {/* Floating Map Controls: Auto-Center Toggle, Locate Me / Fit Route, Zoom */}
+      {/* Floating Map Controls: Locate Me / Fit Route, Zoom */}
       <div className="absolute bottom-2 right-2 flex flex-col gap-1.5 z-[400]">
-        {/* AUTO-CENTER TOGGLE BUTTON */}
-        <button
-          onClick={handleToggleAutoCenter}
-          className={`h-7 px-2 rounded-lg shadow-md flex items-center justify-center gap-1 font-sports font-bold text-[11px] transition-all border ${
-            autoCenter 
-              ? 'bg-blue-600 text-white border-blue-500 ring-2 ring-blue-500/30' 
-              : 'bg-white/95 text-zinc-700 border-zinc-300 hover:bg-white'
-          }`}
-          title={autoCenter ? 'Auto-Center is ON (Tracking Rider)' : 'Auto-Center is OFF (Tap to Center)'}
-        >
-          <Crosshair className={`w-3.5 h-3.5 ${autoCenter ? 'text-white' : 'text-zinc-500'}`} />
-          <span>{autoCenter ? 'CENTER ON' : 'CENTER'}</span>
-        </button>
 
         {/* If active route: Fit Entire Route; Otherwise: Locate My Current Position */}
         {routePoints && routePoints.length > 1 ? (

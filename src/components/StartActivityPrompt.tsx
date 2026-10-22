@@ -5,6 +5,7 @@ import { RouteData } from '../types/cycling';
 interface StartActivityPromptProps {
   isOpen: boolean;
   activeRoute?: RouteData | null;
+  isResume?: boolean;
   onStart: () => void;
   onDismiss: () => void;
 }
@@ -12,6 +13,7 @@ interface StartActivityPromptProps {
 export const StartActivityPrompt: React.FC<StartActivityPromptProps> = ({
   isOpen,
   activeRoute,
+  isResume = false,
   onStart,
   onDismiss
 }) => {
@@ -21,21 +23,27 @@ export const StartActivityPrompt: React.FC<StartActivityPromptProps> = ({
 
   return (
     <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-4 sm:w-96 z-[9990] animate-in slide-in-from-bottom-5 duration-300">
-      <div className="bg-zinc-900/95 backdrop-blur-md border border-emerald-500/40 rounded-2xl p-4 shadow-2xl text-white">
+      <div className={`bg-zinc-900/95 backdrop-blur-md border rounded-2xl p-4 shadow-2xl text-white ${
+        isResume ? 'border-amber-500/50 shadow-amber-500/10' : 'border-emerald-500/40 shadow-emerald-500/10'
+      }`}>
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
-              <Activity className="w-5 h-5 text-emerald-400 animate-pulse" />
+            <div className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${
+              isResume ? 'bg-amber-500/20 border-amber-500/40 text-amber-400' : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
+            }`}>
+              <Activity className="w-5 h-5 animate-pulse" />
             </div>
             <div>
               <div className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                <h4 className="font-sports font-bold text-xs uppercase tracking-wider text-emerald-400">
-                  GPS Ready · Start Ride?
+                <span className={`w-2 h-2 rounded-full animate-ping ${isResume ? 'bg-amber-400' : 'bg-emerald-400'}`} />
+                <h4 className={`font-sports font-bold text-xs uppercase tracking-wider ${
+                  isResume ? 'text-amber-400' : 'text-emerald-400'
+                }`}>
+                  {isResume ? 'Movement Detected · Resume?' : 'Movement Detected · Start?'}
                 </h4>
               </div>
               <p className="text-[11px] text-zinc-300 mt-0.5 line-clamp-1">
-                Mode: <span className="font-semibold text-white">{routeTitle}</span>
+                {isResume ? 'Your session is currently paused.' : `Mode: ${routeTitle}`}
               </p>
             </div>
           </div>
@@ -55,17 +63,21 @@ export const StartActivityPrompt: React.FC<StartActivityPromptProps> = ({
           </div>
           <div className="flex items-center gap-1.5">
             <Compass className="w-3.5 h-3.5 text-zinc-500" />
-            <span>{activeRoute ? `+${activeRoute.totalElevationGain}m elevation` : 'Dual timers & auto-pause'}</span>
+            <span>{isResume ? 'Keep recording distance' : 'Dual timers & auto-pause'}</span>
           </div>
         </div>
 
         <div className="mt-3 flex items-center gap-2">
           <button
             onClick={onStart}
-            className="flex-1 py-2.5 px-3 bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-black font-sports font-bold text-xs tracking-wide rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all active:scale-[0.98]"
+            className={`flex-1 py-2.5 px-3 font-sports font-bold text-xs tracking-wide rounded-xl flex items-center justify-center gap-2 shadow-lg transition-all active:scale-[0.98] ${
+              isResume
+                ? 'bg-amber-500 hover:bg-amber-400 text-black shadow-amber-500/20'
+                : 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-emerald-500/20'
+            }`}
           >
             <Play className="w-3.5 h-3.5 fill-current" />
-            <span>START ACTIVITY</span>
+            <span>{isResume ? 'RESUME ACTIVITY' : 'START ACTIVITY'}</span>
           </button>
           <button
             onClick={onDismiss}

@@ -1,78 +1,97 @@
-# Implementation Plan: Smart Auto-Lap, Strava GPX/JSON Export & Live Weather Indicator
+# Add Current Time/Date Metric & Relocate Map Controls to Sidebar
 
-A comprehensive enhancement to the Magene C706 cycling computer app integrating automated distance laps with haptic/audio feedback, multi-format ride export (Strava-ready standard GPX and detailed JSON telemetry), and a compact live weather & rain probability widget powered by current GPS coordinates.
+Add a live 24-hour clock and date metric to the secondary header sub-strip (red box area) and move the floating map controls (Auto-Center and 180° Inversion) into a dedicated "Map Settings" card in the sidebar drawer.
 
----
+## User Review & Critical Decisions
 
-## 1. User Decisions & Specification Alignment
+> [!IMPORTANT]
+> The following design decisions were confirmed through interactive clarification and govern this implementation:
 
-Based on user requirements and clarifying confirmations:
-1. **Smart Auto-Lap**:
-   - Default interval set to **5 km**, with a toggle between **5 km**, **10 km**, and **Off** directly in the Drawer Menu.
-   - When each interval is reached while recording, triggers a distinctive dual-tone audio alert, haptic vibration (`navigator.vibrate`), and a high-contrast 4-second auto-lap banner on the Magene C706 screen showing Lap Number, Lap Split Time, and Lap Avg Speed.
-2. **Ride Export (JSON & Strava GPX)**:
-   - **Strava GPX Export**: Generates a valid XML GPX 1.1 file containing all recorded GPS breadcrumb track points with ISO-8601 timestamps, elevations, and speed extensions, immediately importable to Strava, Garmin Connect, and TrainingPeaks.
-   - **JSON Telemetry Export**: Downloads comprehensive ride telemetry (moving time, saddle time, elevation gain, max/avg speed, cadence, heart rate, power zones, and GPS coordinate array) for data science or offline analysis.
-   - Includes a direct 1-click link to open `strava.com/upload/select`.
-3. **Live Weather Indicator**:
-   - Non-intrusive, compact weather pill in the Magene top status bar and Page 1 HUD.
-   - Driven dynamically by the rider's live GPS coordinates (`currentCoords.lat`, `currentCoords.lng`).
-   - Displays current temperature (°C), live condition icon (sun, rain clouds, overcast), and rain/precipitation probability percentage (e.g., `24°C • 15% Rain`).
-   - Zero-configuration live weather service with real-time updates and graceful offline fallback.
+- **Confirmed Decision 1 (Clock & Date Format)**: 24-hour time with ticking seconds and short date (`14:35:20` / `OCT 22`) formatted with digital tabular numerals, placed as the center column between `TOTAL DIST` and `TOTAL ASCENT`.
+- **Confirmed Decision 2 (Sidebar Map Settings Placement)**: Position the new **Map Settings** card directly in the sidebar drawer above display preferences/tools for quick in-ride accessibility while keeping the live Leaflet map unobstructed.
+- **Confirmed Decision 3 (Clean Map Canvas)**: Remove the floating `CENTER ON` and `180° FLIP` buttons from the Leaflet overlay surface, keeping only course fit/locate and zoom controls for an uncluttered bike computer map display.
 
 ---
 
-## 2. Technical Architecture & Component Changes
+## 1. Overview & Core Concept
 
-### A. Auto-Lap Engine (`src/utils/gpsService.ts` & `src/App.tsx`)
-- Extend `gpsService` or tracking coordinator to track cumulative lap distance.
-- State: `autoLapDistance`: `5000` (5km) | `10000` (10km) | `0` (Off). Persisted in `localStorage`.
-- When `distanceTraveled - lastLapDistance >= autoLapDistance`:
-  - Increment lap count.
-  - Calculate lap split duration and lap avg speed.
-  - Play double chime via `bikeBeeper.lapChime()`.
-  - Trigger haptic pulse via `navigator.vibrate([120, 80, 120])`.
-  - Display non-intrusive floating `AutoLapToast` overlay on Magene display for 4 seconds.
-  - Add Lap setting selector (5 km / 10 km / Off) in Drawer Menu Tab 1.
-
-### B. Strava-Ready GPX & JSON Exporters (`src/utils/rideExport.ts`)
-- Create `src/utils/rideExport.ts`:
-  - `exportRideToGpx(session, historyItem)`: Builds compliant GPX 1.1 document with metadata, track name, and `<trkpt lat="..." lon="...">` with `<ele>`, `<time>`, and `<extensions>` containing speed and power.
-  - `exportRideToJson(session, historyItem)`: Formats full metadata and coordinates into pretty-printed JSON.
-  - `downloadBlob(blob, filename)`: Utility to initiate browser download.
-- Integrate into `src/components/RideSummaryModal.tsx`:
-  - Add dedicated "Export to Strava (.GPX)" button with Strava icon.
-  - Add "Export Telemetry (.JSON)" button with download icon.
-  - Add "Upload to Strava" link button for convenient workflow.
-- Also make export available on past rides in the **History** tab of the drawer.
-
-### C. Live GPS Weather Service (`src/services/weatherService.ts` & `src/components/WeatherBadge.tsx`)
-- Create `src/services/weatherService.ts`:
-  - Queries real-time weather by latitude and longitude.
-  - Returns `{ tempC: number, condition: string, rainProbability: number, icon: string, locationName?: string }`.
-  - Caches results for 10 minutes to respect rate limits and conserve battery.
-- Create `src/components/WeatherBadge.tsx`:
-  - Ultra-compact sports HUD pill fitting cleanly into Magene C706 top status bar or page header.
-  - Shows current temperature, dynamic weather icon, and rain probability with color coding (< 20% neutral, 20-50% amber, > 50% cyan/blue rain alert).
-  - Tapping opens a mini quick popover with wind speed, humidity, and forecast overview.
+- **What It Does**:
+  1. Expands the 2-column metric strip (`TOTAL DIST` | `TOTAL ASCENT`) into a balanced 3-column instrument cluster: `[ TOTAL DIST | TIME / DATE | TOTAL ASCENT ]`.
+  2. Creates a clean, centralized **Map Settings** panel in the Magene C706 slide-out drawer featuring dedicated tactile switches for **Auto-Center Map** and **Invert Arrow 180°**.
+  3. De-clutters the live GPS navigation viewport by removing intrusive floating buttons.
+- **Target Audience**: Cyclists navigating outdoor routes who need immediate glanceable awareness of time-of-day alongside route distance and elevation gain, and who want clean map visibility without accidental button taps while riding.
+- **Key Value**: Professional Magene C706 head-unit aesthetics, comprehensive ride context, and simplified map interaction.
 
 ---
 
-## 3. Implementation Steps & Verification Plan
+## 2. User Experience & Visual Design
 
-1. **Auto-Lap Engine & UI Settings**:
-   - Add auto-lap configuration state and persistence in `App.tsx`.
-   - Implement distance threshold listener and lap alert triggering.
-   - Build `AutoLapNotification` banner in `MageneDevice.tsx`.
-   - Add Auto-Lap toggle control (5 km / 10 km / Off) in the Drawer Menu.
-2. **Export Utilities & Ride Summary Integration**:
-   - Implement GPX 1.1 generator and JSON telemetry serializer in `src/utils/rideExport.ts`.
-   - Add "Export GPX (Strava)" and "Export JSON" action buttons in `RideSummaryModal.tsx` and History list cards.
-3. **Weather Integration**:
-   - Implement `weatherService.ts` querying live GPS coordinates.
-   - Implement `WeatherBadge.tsx` and mount it cleanly in `MageneDevice.tsx` top status bar.
-4. **Verification**:
-   - Validate auto-lap trigger logic with audio beep and haptic vibration.
-   - Test GPX and JSON export file downloads and confirm Strava-compatible XML schema.
-   - Verify weather badge renders temperature and rain probability accurately from GPS.
-   - Run `lint_applet` and `compile_applet`.
+### A. Sub-Strip Metric Rebalancing (Red Box Section)
+- **3-Column Grid (`grid-cols-3 divide-x divide-zinc-200 dark:divide-zinc-800`)**:
+  - **Left Column (`TOTAL DIST` / `DIST.REMAIN`)**: Numeric distance in kilometers with high-contrast digital typography (`font-digital text-[20px] sm:text-[24px]`).
+  - **Center Column (`TIME / DATE`)**:
+    - Primary digital clock: `HH:mm:ss` (24h format) ticking every second with fixed-width tabular numerals to avoid jitter (`font-digital text-[18px] sm:text-[22px] font-bold tabular-nums`).
+    - Secondary date kicker: `THU, OCT 22` or `OCT 22` in clean uppercase athletic typography (`font-sports font-bold text-[9px] sm:text-[10px] tracking-wider text-zinc-500`).
+  - **Right Column (`TOTAL ASCENT` / `REM. ASCENT`)**: Elevation in meters (`font-digital text-[20px] sm:text-[24px]`).
+- **Daylight & Dark Mode Contrast**: Seamlessly conforms to light mode (crisp white background, dark zinc numerals) and dark mode (`bg-zinc-950`, crisp emerald/white figures).
+
+### B. Map Settings in the Sidebar Drawer
+- **Dedicated Map Settings Section**:
+  - Located in the drawer's `GPS / MAP` tab directly above hardware tools and auto-lap configurations.
+  - **Auto-Center Toggle**: Clear switch indicating whether the map automatically follows the cyclist's GPS coordinate or allows free-panning.
+  - **180° Heading Invert Toggle**: Clear switch indicating whether the orientation arrow is flipped 180° for reverse handlebar mounts. Persisted in `localStorage`.
+- **Streamlined Map Viewport**:
+  - The bottom-right floating stack retains only contextual Zoom (`+` / `−`) and Route Fit / Snap-to-location buttons.
+
+---
+
+## 3. Key Product Decisions & Trade-Offs
+
+- **Decision 1: 3-Column Instrument Cluster**
+  - *Chosen Approach*: Replace the 2-column flex grid with an equal-width 3-column grid (`grid-cols-3 divide-x`).
+  - *Why*: In cycling computers (Garmin Edge, Wahoo ELEMNT, Magene C-series), time-of-day and elapsed riding time are distinct metrics. Having current time + date right below ride duration provides instant schedule tracking without having to exit the ride screen.
+  - *Alternatives Considered*: Floating clock badge in the top bar (already crowded with battery, BLE status, GPS quality, and recording indicators).
+- **Decision 2: Centralized Map Settings in Sidebar Drawer**
+  - *Chosen Approach*: Lift `autoCenter` and `invertHeading` states to `App.tsx` and pass them into `GpsMapView`, surfacing the controls in the drawer's Map Settings panel.
+  - *Why*: Floating buttons on Leaflet maps are prone to accidental touch when cycling over rough terrain and obscure map routes and turn-by-turn prompts. The drawer provides dedicated, fat-finger-friendly touch switches ($48\text{px}$ touch targets).
+
+---
+
+## 4. Technical Architecture & Data Strategy
+
+```
+┌────────────────────────────────────────────────────────┐
+│                        App.tsx                         │
+│  - State: autoCenter (boolean, default true)           │
+│  - State: invertHeading (persisted in localStorage)    │
+│  - Drawer: "Map Settings" Toggle Switches Card         │
+└───────────────────────────┬────────────────────────────┘
+                            │
+              ┌─────────────┴─────────────┐
+              ▼                           ▼
+┌───────────────────────────┐ ┌──────────────────────────┐
+│      MageneDevice.tsx     │ │      GpsMapView.tsx      │
+│  - 3-Col Header Sub-Strip │ │  - Pure map rendering    │
+│    • Col 1: TOTAL DIST    │ │  - Follows autoCenter    │
+│    • Col 2: TIME / DATE   │ │  - Needle uses inverted  │
+│    • Col 3: TOTAL ASCENT  │ │    heading if enabled    │
+│  - 1s interval clock hook │ │  - Clutter-free overlay  │
+└───────────────────────────┘ └──────────────────────────┘
+```
+
+### Component & File Work Plan:
+
+1. **`src/components/MageneDevice.tsx`**:
+   - Add interval timer for real-time 24-hour clock (`HH:mm:ss`) and formatted date (`OCT 22`).
+   - Update the red-boxed second row from `grid-cols-2` to `grid-cols-3 divide-x`.
+   - Pass `autoCenter` and `invertHeading` props to `GpsMapView`.
+
+2. **`src/components/GpsMapView.tsx`**:
+   - Accept `autoCenter` and `invertHeading` (plus optional callbacks) as controlled props.
+   - Remove the floating `CENTER ON` and `180° FLIP` buttons from the overlay stack in lines 570–596.
+   - Maintain map center behavior when `autoCenter` is true.
+
+3. **`src/App.tsx`**:
+   - Manage `autoCenter` and `invertHeading` states (with `localStorage` persistence for `invertHeading`).
+   - Add a high-visibility **Map Settings** card in the drawer (`routes` tab) above display preferences and developer tools.
+   - Pass `autoCenter` and `invertHeading` to `MageneDevice`.

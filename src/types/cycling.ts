@@ -76,6 +76,18 @@ export interface ClimbProLiveState {
   vam: number; // Vertical Ascent in m/hour
 }
 
+export interface BreadcrumbPoint {
+  lat: number;
+  lng: number;
+  ele?: number;
+  time?: number;
+  speed?: number;
+  power?: number | null;
+  cadence?: number | null;
+  heartRate?: number | null;
+  distance?: number;
+}
+
 export interface ActiveRideSession {
   id: string; // Unique session ID
   startedAt: number; // Unix timestamp
@@ -93,7 +105,7 @@ export interface ActiveRideSession {
   currentGrade: number;
   vam: number;
   calories: number;
-  breadcrumbs: { lat: number; lng: number }[];
+  breadcrumbs: BreadcrumbPoint[];
 }
 
 export interface RideMetrics {
@@ -167,5 +179,7 @@ export interface RideHistoryItem {
   maxSpeedKmh: number;
   calories: number;
   avgPowerWatts?: number | null;
-  breadcrumbs?: { lat: number; lng: number }[];
+  avgCadenceRpm?: number | null;
+  avgHeartRateBpm?: number | null;
+  breadcrumbs?: BreadcrumbPoint[];
 }

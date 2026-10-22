@@ -1,4 +1,4 @@
-import { RideHistoryItem, ActiveRideSession } from '../types/cycling';
+import { RideHistoryItem, ActiveRideSession, BreadcrumbPoint } from '../types/cycling';
 
 const STORAGE_KEY = 'magene-c706-ride-history';
 const ACTIVE_SESSION_KEY = 'magene-active-session-v1';
@@ -52,7 +52,9 @@ export function saveRideToHistory(data: {
   maxSpeedKmh: number;
   calories: number;
   avgPowerWatts?: number | null;
-  breadcrumbs?: { lat: number; lng: number }[];
+  avgCadenceRpm?: number | null;
+  avgHeartRateBpm?: number | null;
+  breadcrumbs?: BreadcrumbPoint[];
 }): RideHistoryItem | null {
   if (typeof window === 'undefined') return null;
   // Ignore negligible rides (under 10 meters and under 5 seconds)
@@ -81,11 +83,26 @@ export function saveRideToHistory(data: {
       maxSpeedKmh: Math.round(data.maxSpeedKmh * 10) / 10,
       calories: Math.round(data.calories),
       avgPowerWatts: data.avgPowerWatts ? Math.round(data.avgPowerWatts) : null,
-      breadcrumbs: data.breadcrumbs && data.breadcrumbs.length > 0 ? data.breadcrumbs.slice(-500) : undefined
+      avgCadenceRpm: data.avgCadenceRpm ? Math.round(data.avgCadenceRpm) : null,
+      avgHeartRateBpm: data.avgHeartRateBpm ? Math.round(data.avgHeartRateBpm) : null,
+      breadcrumbs: data.breadcrumbs && data.breadcrumbs.length > 0 ? data.breadcrumbs : undefined
     };
 
     const updated = [newItem, ...existing.slice(0, 49)]; // store up to 50 rides
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    } catch {
+      // If full array exceeds storage quota, save with slightly downsampled points
+      const compactUpdated = updated.map(item => {
+        if (!item.breadcrumbs || item.breadcrumbs.length <= 1500) return item;
+        const step = Math.ceil(item.breadcrumbs.length / 1500);
+        return {
+          ...item,
+          breadcrumbs: item.breadcrumbs.filter((_, idx) => idx % step === 0)
+        };
+      });
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(compactUpdated));
+    }
     // Clear active session once completed and archived
     clearActiveSession();
     return newItem;

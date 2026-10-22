@@ -49,6 +49,21 @@ export function calculateBearingDegrees(lat1: number, lon1: number, lat2: number
   return (brng + 360) % 360;
 }
 
+export function smoothCircularAngles(angles: number[]): number {
+  if (angles.length === 0) return 0;
+  if (angles.length === 1) return angles[0];
+  let sumSin = 0;
+  let sumCos = 0;
+  for (const a of angles) {
+    const rad = (a * Math.PI) / 180;
+    sumSin += Math.sin(rad);
+    sumCos += Math.cos(rad);
+  }
+  const avgRad = Math.atan2(sumSin / angles.length, sumCos / angles.length);
+  const deg = (avgRad * 180) / Math.PI;
+  return (deg + 360) % 360;
+}
+
 export function accuracyToQuality(accuracy: number): GpsFix['quality'] {
   if (accuracy < 15) return 'GPS 3D';
   if (accuracy < 40) return 'GPS 2D';
@@ -84,6 +99,8 @@ class GpsService {
   private accumulatedDistMeters: number = 0;
   private slidingVam: number = 0;
   private hasGoodLock = false;
+  private headingHistory: number[] = [];
+  private lastKnownHeading: number = 0;
 
   // Auto-Pause state & timer
   private lowSpeedStartTime: number | null = null;
@@ -122,13 +139,11 @@ class GpsService {
       return false;
     }
 
-    this.stopTracking();
+    this.stopTracking(false);
     this.onFixCb = onFix;
     this.onErrorCb = onError;
     this.onAutoPauseChange = onAutoPauseChange || null;
     this.lowSpeedStartTime = null;
-    this.isAutoPaused = false;
-    this.hasGoodLock = false;
     this.batterySaver = !!options?.batterySaver;
 
     this.autoPauseCheckInterval = window.setInterval(() => {
@@ -231,7 +246,6 @@ class GpsService {
 
     let deltaDist = 0;
     let speedKmh = 0;
-    let heading = coords.heading ?? 0;
 
     if (this.prevFix) {
       const dtSeconds = Math.max(0.2, (now - this.prevFix.timestamp) / 1000);
@@ -246,10 +260,6 @@ class GpsService {
       if (rawDist > Math.max(1.5, acc * 0.15)) {
         deltaDist = rawDist;
         this.accumulatedDistMeters += deltaDist;
-
-        if (coords.heading === null || isNaN(coords.heading)) {
-          heading = calculateBearingDegrees(this.prevFix.lat, this.prevFix.lng, lat, lng);
-        }
       }
 
       if (coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0) {
@@ -257,6 +267,25 @@ class GpsService {
       } else if (deltaDist > 0 && dtSeconds > 0) {
         speedKmh = (deltaDist / dtSeconds) * 3.6;
       }
+    }
+
+    // Heading calculation:
+    // Prioritize Course Over Ground (GPS vector bearing from prevFix) whenever moving (speedKmh >= 2.0 or deltaDist >= 1.5).
+    // Apply 3-sample circular angular smoothing to eliminate heading jitter.
+    // When stopped (< 2.0 km/h), maintain last smoothed heading or fall back to device compass.
+    let heading = this.lastKnownHeading;
+
+    if (this.prevFix && (speedKmh >= 2.0 || deltaDist >= 1.5)) {
+      const instantaneousBearing = calculateBearingDegrees(this.prevFix.lat, this.prevFix.lng, lat, lng);
+      this.headingHistory.push(instantaneousBearing);
+      if (this.headingHistory.length > 3) {
+        this.headingHistory.shift();
+      }
+      heading = smoothCircularAngles(this.headingHistory);
+      this.lastKnownHeading = heading;
+    } else if (coords.heading !== null && !isNaN(coords.heading) && coords.heading >= 0) {
+      heading = coords.heading;
+      this.lastKnownHeading = heading;
     }
 
     if (speedKmh < 0.5) {
@@ -325,7 +354,7 @@ class GpsService {
     this.onErrorCb?.(msg);
   }
 
-  public stopTracking() {
+  public stopTracking(resetLock = true) {
     if (this.watchId !== null) {
       navigator.geolocation.clearWatch(this.watchId);
       this.watchId = null;
@@ -340,7 +369,9 @@ class GpsService {
     }
     this.lowSpeedStartTime = null;
     this.isAutoPaused = false;
-    this.hasGoodLock = false;
+    if (resetLock) {
+      this.hasGoodLock = false;
+    }
     this.onFixCb = null;
     this.onErrorCb = null;
   }
@@ -354,6 +385,8 @@ class GpsService {
     this.lowSpeedStartTime = null;
     this.isAutoPaused = false;
     this.hasGoodLock = false;
+    this.headingHistory = [];
+    this.lastKnownHeading = 0;
   }
 }
 

@@ -22,7 +22,8 @@ import {
   Square,
   CornerUpLeft,
   CornerUpRight,
-  ArrowUp
+  ArrowUp,
+  X
 } from 'lucide-react';
 
 import { RoutePoint, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert, RouteTurn } from '../types/cycling';
@@ -56,6 +57,7 @@ interface MageneDeviceProps {
   routeName?: string;
   onLocateMe?: () => void;
   latestLapAlert?: AutoLapAlert | null;
+  onDismissLapAlert?: () => void;
   weather?: WeatherData | null;
   weatherLoading?: boolean;
   batterySaver?: boolean;
@@ -63,6 +65,10 @@ interface MageneDeviceProps {
   /** When false, show OFFLINE chip (weather/Strava unavailable) */
   isOnline?: boolean;
   basemapToken?: number;
+  autoCenter?: boolean;
+  onToggleAutoCenter?: () => void;
+  invertHeading?: boolean;
+  onToggleInvertHeading?: () => void;
 }
 
 function formatClock12h(d: Date): string {
@@ -74,6 +80,16 @@ function formatClock12h(d: Date): string {
   if (h === 0) h = 12;
   const pad = (n: number) => n.toString().padStart(2, '0');
   return `${h}:${pad(m)}:${pad(s)} ${ampm}`;
+}
+
+function formatClock24h(d: Date): string {
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function formatDateWithYear(d: Date): string {
+  const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+  return `${months[d.getMonth()]} ${d.getDate().toString().padStart(2, '0')} ${d.getFullYear()}`;
 }
 
 function NextTurnGlyph({ turn, className = 'w-4 h-4' }: { turn: RouteTurn; className?: string }) {
@@ -133,18 +149,26 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   routeName,
   onLocateMe,
   latestLapAlert,
+  onDismissLapAlert,
   weather = null,
   weatherLoading = false,
   batterySaver = false,
   fitRouteToken = 0,
   isOnline = true,
-  basemapToken = 0
+  basemapToken = 0,
+  autoCenter,
+  onToggleAutoCenter,
+  invertHeading,
+  onToggleInvertHeading
 }) => {
-  const [clockStr, setClockStr] = useState(() => formatClock12h(new Date()));
+  const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
   useEffect(() => {
-    const id = window.setInterval(() => setClockStr(formatClock12h(new Date())), 1000);
+    const id = window.setInterval(() => setCurrentDate(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
+  const clockStr = formatClock12h(currentDate);
+  const clock24hStr = formatClock24h(currentDate);
+  const dateWithYearStr = formatDateWithYear(currentDate);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
 
@@ -286,7 +310,9 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
           </div>
 
           <span
-            className="pl-1 font-digital font-bold text-[11px] tabular-nums text-zinc-700 dark:text-zinc-200 whitespace-nowrap"
+            className={`pl-1 font-digital font-bold text-[11px] tabular-nums whitespace-nowrap ${
+              isDarkMode ? 'text-zinc-200' : 'text-zinc-800'
+            }`}
             title="Local time"
           >
             {clockStr}
@@ -294,18 +320,22 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
         </div>
       </div>
 
-      {/* AUTO-LAP CELEBRATION TOAST OVERLAY */}
+      {/* AUTO-LAP CELEBRATION TOAST OVERLAY (Auto-dismisses in 6s or tap to dismiss) */}
       {latestLapAlert && (
-        <div className="absolute top-10 left-3 right-3 z-[650] animate-in slide-in-from-top-3 fade-in duration-200 shadow-2xl">
-          <div className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl p-2.5 border-2 border-white/80 shadow-lg flex items-center justify-between">
+        <div
+          onClick={onDismissLapAlert}
+          className="absolute top-10 left-3 right-3 z-[650] animate-in slide-in-from-top-3 fade-in duration-200 shadow-2xl cursor-pointer"
+          title="Tap to dismiss alert"
+        >
+          <div className="bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 text-white rounded-xl p-2.5 border-2 border-white/80 shadow-lg flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-lg bg-white/20 flex flex-col items-center justify-center font-digital font-bold leading-none">
+              <div className="w-9 h-9 rounded-lg bg-white/20 flex flex-col items-center justify-center font-digital font-bold leading-none shrink-0">
                 <span className="text-[9px] uppercase font-sports">LAP</span>
                 <span className="text-sm">{latestLapAlert.lapNumber}</span>
               </div>
               <div>
                 <div className="font-sports font-bold text-xs uppercase tracking-wider text-blue-100 flex items-center gap-1.5">
-                  <span className="bg-white/25 px-1.5 py-0.2 rounded text-[9px]">AUTO LAP</span>
+                  <span className="bg-white/25 px-1.5 py-0.5 rounded text-[9px]">AUTO LAP</span>
                   <span>{(latestLapAlert.lapDistanceMeters / 1000).toFixed(1)} KM</span>
                 </div>
                 <div className="text-[11px] font-digital font-bold text-white mt-0.5">
@@ -313,7 +343,20 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 </div>
               </div>
             </div>
-            <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping mr-1" />
+            <div className="flex items-center gap-2">
+              <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDismissLapAlert?.();
+                }}
+                className="p-1 rounded-md bg-white/15 hover:bg-white/25 text-white/90 hover:text-white transition-colors"
+                title="Close"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -336,33 +379,54 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
               </div>
             </div>
 
-            {/* Second Row: DIST.REMAIN vs TOTAL DIST and REM. ASCENT vs TOTAL ASCENT */}
-            <div className={`grid grid-cols-2 divide-x border-b py-1.5 px-3 shrink-0 ${
+            {/* Second Row: DIST.REMAIN vs TOTAL DIST, TIME / DATE (24h + short date), and REM. ASCENT vs TOTAL ASCENT */}
+            <div className={`grid grid-cols-3 divide-x border-b py-1.5 px-2 shrink-0 ${
               isDarkMode ? 'divide-zinc-800 border-zinc-800 bg-zinc-950' : 'divide-zinc-200 border-zinc-200 bg-white'
             }`}>
-              <div className="flex flex-col items-center">
-                <span className="text-[10px] sm:text-[11px] font-sports font-semibold tracking-wider text-zinc-400 uppercase">
-                  {hasActiveRoute ? 'DIST.REMAIN' : 'TOTAL DIST'}
+              {/* Col 1: Distance */}
+              <div className="flex flex-col items-center justify-center min-w-0">
+                <span className="text-[9px] sm:text-[10px] font-sports font-semibold tracking-wider text-zinc-400 uppercase truncate">
+                  {hasActiveRoute ? 'DIST.REM' : 'TOT.DIST'}
                 </span>
-                <div className="flex items-baseline gap-1">
-                  <span className="font-digital text-[26px] sm:text-[30px] font-bold leading-none">
+                <div className="flex items-baseline gap-0.5">
+                  <span className="font-digital text-[20px] sm:text-[24px] font-bold leading-none tabular-nums">
                     {hasActiveRoute ? distRemainKm : (metrics.distanceTraveled / 1000).toFixed(2)}
                   </span>
-                  <span className="font-sports font-bold text-[12px] text-zinc-500">
+                  <span className="font-sports font-bold text-[10px] text-zinc-500">
                     km
                   </span>
                 </div>
               </div>
 
-              <div className="flex flex-col items-center">
-                <span className="text-[10px] sm:text-[11px] font-sports font-semibold tracking-wider text-zinc-400 uppercase">
-                  {hasActiveRoute ? 'REM. ASCENT' : 'TOTAL ASCENT'}
+              {/* Col 2: Current Time & Current Date (24h format + Month/Day/Year e.g. OCT 22 2026) */}
+              <div className="flex flex-col items-center justify-center min-w-0">
+                <span className="text-[9px] sm:text-[10px] font-sports font-semibold tracking-wider text-zinc-400 uppercase truncate">
+                  TIME / DATE
                 </span>
-                <div className="flex items-baseline gap-1">
-                  <span className="font-digital text-[26px] sm:text-[30px] font-bold leading-none">
+                <div className="flex flex-col items-center justify-center leading-none mt-0.5">
+                  <span className={`font-digital text-[16px] sm:text-[19px] font-bold leading-none tracking-tight tabular-nums ${
+                    isDarkMode ? 'text-white' : 'text-zinc-950'
+                  }`}>
+                    {clock24hStr}
+                  </span>
+                  <span className={`font-sports font-bold text-[9px] sm:text-[10px] uppercase tracking-wider mt-0.5 whitespace-nowrap ${
+                    isDarkMode ? 'text-zinc-400' : 'text-zinc-600'
+                  }`}>
+                    {dateWithYearStr}
+                  </span>
+                </div>
+              </div>
+
+              {/* Col 3: Ascent */}
+              <div className="flex flex-col items-center justify-center min-w-0">
+                <span className="text-[9px] sm:text-[10px] font-sports font-semibold tracking-wider text-zinc-400 uppercase truncate">
+                  {hasActiveRoute ? 'REM.ASC' : 'TOT.ASC'}
+                </span>
+                <div className="flex items-baseline gap-0.5">
+                  <span className="font-digital text-[20px] sm:text-[24px] font-bold leading-none tabular-nums">
                     {hasActiveRoute ? remAscentM : Math.round(metrics.totalAscent)}
                   </span>
-                  <span className="font-sports font-bold text-[12px] text-zinc-500">
+                  <span className="font-sports font-bold text-[10px] text-zinc-500">
                     m
                   </span>
                 </div>
@@ -382,6 +446,10 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 batterySaver={batterySaver}
                 fitRouteToken={fitRouteToken}
                 basemapToken={basemapToken}
+                autoCenter={autoCenter}
+                onToggleAutoCenter={onToggleAutoCenter}
+                invertHeading={invertHeading}
+                onToggleInvertHeading={onToggleInvertHeading}
               />
               {/* Live next-turn cue (square, bottom-left) */}
               {nextTurnCue && (

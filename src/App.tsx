@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { RouteData, RoutePoint, ClimbSegment, RideMetrics, BleDeviceStatus, GpsStatus, RideHistoryItem, ActiveRideSession, AutoLapAlert } from './types/cycling';
+import { RouteData, RoutePoint, ClimbSegment, RideMetrics, BleDeviceStatus, GpsStatus, RideHistoryItem, ActiveRideSession, AutoLapAlert, BreadcrumbPoint } from './types/cycling';
 import { parseGpxRoute } from './data/routes';
 import { calculateClimbProLiveState } from './utils/climbProEngine';
 import { bleManager } from './utils/bleManager';
@@ -8,7 +8,7 @@ import { gpsService, GpsFix, accuracyToQuality, FAST_GEO_OPTIONS } from './utils
 import { bikeBeeper } from './utils/audioAlerts';
 import { getPowerZoneInfo, getHeartRateZoneInfo, POWER_ZONES_CONFIG, HR_ZONES_CONFIG } from './utils/powerZones';
 import { loadRideHistory, saveRideToHistory, deleteRideFromHistory, clearRideHistory, loadActiveSession, saveActiveSession, clearActiveSession } from './utils/rideHistory';
-import { exportRideToGpx, exportRideToJson, openStravaUpload } from './utils/rideExport';
+import { exportRideToFit, exportRideToGpx, exportRideToJson, openStravaUpload } from './utils/rideExport';
 import { fetchLiveWeather, WeatherData } from './services/weatherService';
 import { captureStravaRedirectTokens, isStravaConnected, startStravaConnect, clearStravaTokens } from './utils/stravaAuth';
 import { loadUserRoutes, loadUserRoutesAsync, saveUserRoute, deleteUserRoute } from './utils/routeLibrary';
@@ -160,6 +160,36 @@ export default function App() {
     }
   });
 
+  // Map Navigation Settings (Auto-Center & 180° Heading Invert)
+  const [autoCenter, setAutoCenter] = useState<boolean>(true);
+  const [invertHeading, setInvertHeading] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem('magene-invert-heading') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleAutoCenter = () => {
+    setAutoCenter(prev => {
+      const next = !prev;
+      bikeBeeper.beep(next ? 2600 : 1800, 0.05);
+      return next;
+    });
+  };
+
+  const handleToggleInvertHeading = () => {
+    setInvertHeading(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('magene-invert-heading', String(next));
+      } catch {}
+      bikeBeeper.beep(next ? 2800 : 1600, 0.05);
+      return next;
+    });
+  };
+
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [weatherLoading, setWeatherLoading] = useState(false);
   const [slidingVam, setSlidingVam] = useState(0);
@@ -175,7 +205,7 @@ export default function App() {
     }
     return { lat: 14.5995, lng: 120.9842 };
   });
-  const [liveBreadcrumbs, setLiveBreadcrumbs] = useState<{ lat: number; lng: number }[]>(() => {
+  const [liveBreadcrumbs, setLiveBreadcrumbs] = useState<BreadcrumbPoint[]>(() => {
     const s = loadActiveSession();
     return s && s.breadcrumbs ? s.breadcrumbs : [];
   });
@@ -250,13 +280,26 @@ export default function App() {
   const [isFlutterModalOpen, setIsFlutterModalOpen] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const hasDismissedPromptRef = useRef<boolean>(false);
+  const [isResumePrompt, setIsResumePrompt] = useState<boolean>(false);
+  const lastPromptDismissedAtRef = useRef<number>(0);
   const prevClimbInRef = useRef<boolean>(false);
   const lastAltRef = useRef<number>(187);
   const selectedRouteIdRef = useRef<string | null>(selectedRouteId);
   selectedRouteIdRef.current = selectedRouteId;
   const distanceTraveledRef = useRef(distanceTraveled);
   distanceTraveledRef.current = distanceTraveled;
+  const isRecordingRef = useRef(isRecording);
+  isRecordingRef.current = isRecording;
+  const isPausedRef = useRef(isPaused);
+  isPausedRef.current = isPaused;
+  const activeSessionRef = useRef(activeSession);
+  activeSessionRef.current = activeSession;
+  const powerRef = useRef<number | null>(power);
+  powerRef.current = power;
+  const cadenceRef = useRef<number | null>(cadence);
+  cadenceRef.current = cadence;
+  const heartRateRef = useRef<number | null>(heartRate);
+  heartRateRef.current = heartRate;
 
   // Sound sync
   useEffect(() => {
@@ -444,33 +487,51 @@ export default function App() {
         setSlidingVam(fix.vam ?? gpsService.getSlidingVam());
 
         // Speed from GPS if BLE speed sensor is not connected
+        // Speed from GPS if BLE speed sensor is not connected
         if (!bleStatus.cscConnected) {
           setSpeed(fix.speedKmh);
-          if (isRecording) {
+          if (isRecordingRef.current && !isPausedRef.current) {
             setMaxSpeed(prev => Math.max(prev, fix.speedKmh));
           }
         }
 
-        // If not currently recording and rider is moving, prompt to start activity
-        if (!isRecording && !activeSession && !hasDismissedPromptRef.current) {
-          if (fix.speedKmh >= 1.0) {
+        // Auto-start / Resume prompt on movement (>= 2.0 km/h)
+        const now = Date.now();
+        const isNotActive = !isRecordingRef.current || isPausedRef.current;
+        if (isNotActive && fix.speedKmh >= 2.0) {
+          if (now - lastPromptDismissedAtRef.current > 45000) {
+            const willResume = Boolean(activeSessionRef.current || isPausedRef.current);
+            setIsResumePrompt(willResume);
             setShowStartPrompt(true);
           }
         }
 
         // Record live path breadcrumb if recording and moving
         let nextDist = distanceTraveledRef.current;
-        if (isRecording && !isPaused && deltaDist > 0) {
+        if (isRecordingRef.current && !isPausedRef.current && deltaDist > 0) {
           nextDist = distanceTraveledRef.current + deltaDist;
           distanceTraveledRef.current = nextDist;
-          setLiveBreadcrumbs(prev => [...prev.slice(-400), { lat: fix.lat, lng: fix.lng }]);
+          setLiveBreadcrumbs(prev => [
+            ...prev,
+            {
+              lat: fix.lat,
+              lng: fix.lng,
+              ele: fix.altitude > 0 ? fix.altitude : undefined,
+              time: Date.now(),
+              speed: fix.speedKmh,
+              power: powerRef.current ?? undefined,
+              cadence: cadenceRef.current ?? undefined,
+              heartRate: heartRateRef.current ?? undefined,
+              distance: nextDist
+            }
+          ]);
           setDistanceTraveled(nextDist);
         }
 
         // Elevation and smoothed grade
         if (fix.altitude > 0) {
           setCurrentElevation(Math.round(fix.altitude));
-          if (isRecording && !isPaused && fix.altitude > lastAltRef.current) {
+          if (isRecordingRef.current && !isPausedRef.current && fix.altitude > lastAltRef.current) {
             setTotalAscent(prev => prev + (fix.altitude - lastAltRef.current));
           }
           lastAltRef.current = fix.altitude;
@@ -479,7 +540,7 @@ export default function App() {
         setCurrentGrade(instantGrade);
 
         // Free Ride ClimbPro recording (no planned route)
-        if (isRecording && !isPaused && !selectedRouteIdRef.current && deltaDist > 0) {
+        if (isRecordingRef.current && !isPausedRef.current && !selectedRouteIdRef.current && deltaDist > 0) {
           freeRideClimbRecorder.pushSample(
             fix.lat,
             fix.lng,
@@ -500,7 +561,7 @@ export default function App() {
       },
       // Auto-Pause & Auto-Resume callback: called when speed < 0.5 km/h for >5 seconds or movement detected
       (autoPaused: boolean) => {
-        if (!isRecording) return;
+        if (!isRecordingRef.current) return;
         setIsAutoPaused(autoPaused);
         setIsPaused(autoPaused);
         if (autoPaused) {
@@ -523,17 +584,21 @@ export default function App() {
     return () => {
       gpsService.stopTracking();
     };
-  }, [isRecording, isPaused, bleStatus.cscConnected, activeSession, batterySaver]);
+  }, [bleStatus.cscConnected, batterySaver]);
 
   // Prompt rider on initial GPS fix if no activity is running
   useEffect(() => {
-    if (!isRecording && !activeSession && !hasDismissedPromptRef.current && gpsStatus.hasFix) {
-      const timer = setTimeout(() => {
-        if (!isRecording && !activeSession && !hasDismissedPromptRef.current) {
-          setShowStartPrompt(true);
-        }
-      }, 1500);
-      return () => clearTimeout(timer);
+    if (!isRecording && !activeSession && gpsStatus.hasFix) {
+      const now = Date.now();
+      if (now - lastPromptDismissedAtRef.current > 45000) {
+        const timer = setTimeout(() => {
+          if (!isRecordingRef.current && !activeSessionRef.current) {
+            setIsResumePrompt(false);
+            setShowStartPrompt(true);
+          }
+        }, 1500);
+        return () => clearTimeout(timer);
+      }
     }
   }, [gpsStatus.hasFix, isRecording, activeSession]);
 
@@ -581,15 +646,17 @@ export default function App() {
       if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
         navigator.vibrate([120, 80, 120]);
       }
-
-      // Hide toast after 4.5 seconds
-      const timer = setTimeout(() => {
-        setLatestLapAlert(null);
-      }, 4500);
-
-      return () => clearTimeout(timer);
     }
   }, [distanceTraveled, isRecording, autoLapDistance, lastLapDistance, lapCount, lastLapTime, ridingTime, timeElapsed]);
+
+  // Dedicated Auto-Lap notification auto-dismiss timer (6 seconds, cleanly isolated)
+  useEffect(() => {
+    if (!latestLapAlert) return;
+    const timer = setTimeout(() => {
+      setLatestLapAlert(null);
+    }, 6000);
+    return () => clearTimeout(timer);
+  }, [latestLapAlert]);
 
   // Continuous Auto-Save to LocalStorage every 5 seconds
   useEffect(() => {
@@ -608,7 +675,7 @@ export default function App() {
         currentGrade,
         vam: metrics.vam,
         calories: metrics.calories,
-        breadcrumbs: liveBreadcrumbs.slice(-400),
+        breadcrumbs: liveBreadcrumbs,
         updatedAt: Date.now(),
         status: isPaused ? 'paused' : 'recording'
       };
@@ -806,10 +873,6 @@ export default function App() {
     if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
       navigator.vibrate([120, 80, 120]);
     }
-
-    setTimeout(() => {
-      setLatestLapAlert(null);
-    }, 4500);
   };
 
   // Stop / Finish Activity - Prompts RideSummaryModal with Save, Resume, and Discard
@@ -919,6 +982,7 @@ export default function App() {
 
   // Center map on real current location and close drawer
   const handleLocateMe = () => {
+    setAutoCenter(true);
     if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -1065,12 +1129,17 @@ export default function App() {
           liveBreadcrumbs={liveBreadcrumbs}
           onLocateMe={handleLocateMe}
           latestLapAlert={latestLapAlert}
+          onDismissLapAlert={() => setLatestLapAlert(null)}
           weather={weather}
           weatherLoading={weatherLoading}
           batterySaver={batterySaver}
           fitRouteToken={fitRouteToken}
           isOnline={isOnline}
           basemapToken={basemapToken}
+          autoCenter={autoCenter}
+          onToggleAutoCenter={handleToggleAutoCenter}
+          invertHeading={invertHeading}
+          onToggleInvertHeading={handleToggleInvertHeading}
         />
       </div>
 
@@ -1282,6 +1351,69 @@ export default function App() {
                         ))}
                       </div>
                     )}
+                  </div>
+
+                  {/* Map Settings Card: Auto-Center & 180° Flip */}
+                  <div className="bg-zinc-850 border border-zinc-750 rounded-xl p-3 text-xs space-y-2.5 shadow-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="font-sports font-bold text-white uppercase text-xs flex items-center gap-1.5">
+                        <Compass className="w-3.5 h-3.5 text-blue-400" />
+                        Map Settings
+                      </span>
+                      <span className="text-[10px] font-sports font-bold text-zinc-400">
+                        Navigation & Heading
+                      </span>
+                    </div>
+
+                    <div className="space-y-2 pt-0.5">
+                      {/* Auto-Center Toggle */}
+                      <div className="flex items-center justify-between p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <div className="pr-2 min-w-0">
+                          <div className="font-sports font-bold text-white text-xs flex items-center gap-1.5">
+                            <Crosshair className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                            <span>Auto-Center Map</span>
+                          </div>
+                          <p className="text-[10px] text-zinc-400 leading-tight mt-0.5">
+                            Automatically follows rider position on map
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleToggleAutoCenter}
+                          className={`px-3 py-1 rounded-lg font-sports font-bold text-xs border transition-colors shrink-0 ${
+                            autoCenter
+                              ? 'bg-blue-600 border-blue-500 text-white shadow-xs'
+                              : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          {autoCenter ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
+
+                      {/* 180° Invert Heading Toggle */}
+                      <div className="flex items-center justify-between p-2 rounded-lg bg-zinc-900 border border-zinc-800">
+                        <div className="pr-2 min-w-0">
+                          <div className="font-sports font-bold text-white text-xs flex items-center gap-1.5">
+                            <RotateCcw className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                            <span>180° Arrow Heading Invert</span>
+                          </div>
+                          <p className="text-[10px] text-zinc-400 leading-tight mt-0.5">
+                            Flips arrow direction for reverse or handlebar phone mounts
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleToggleInvertHeading}
+                          className={`px-3 py-1 rounded-lg font-sports font-bold text-xs border transition-colors shrink-0 ${
+                            invertHeading
+                              ? 'bg-amber-600 border-amber-500 text-white shadow-xs'
+                              : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          {invertHeading ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
+                    </div>
                   </div>
 
                   {/* Smart Auto-Lap Configuration Card */}
@@ -1519,7 +1651,33 @@ export default function App() {
                               </div>
                             </div>
 
-                            <div className="mt-2.5 pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-1.5 text-[10px]">
+                            <div className="mt-2.5 pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-1 text-[10px]">
+                              <button
+                                onClick={() => {
+                                  exportRideToFit({
+                                    routeName: ride.routeName,
+                                    startedAt: ride.startedAt || ride.timestamp,
+                                    timeElapsed: ride.timeElapsed,
+                                    ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
+                                    saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
+                                    distanceMeters: ride.distanceMeters,
+                                    totalAscentMeters: ride.totalAscentMeters,
+                                    avgSpeedKmh: ride.avgSpeedKmh,
+                                    maxSpeedKmh: ride.maxSpeedKmh,
+                                    calories: ride.calories,
+                                    avgPowerWatts: ride.avgPowerWatts,
+                                    avgCadenceRpm: ride.avgCadenceRpm,
+                                    avgHeartRateBpm: ride.avgHeartRateBpm,
+                                    breadcrumbs: ride.breadcrumbs || []
+                                  });
+                                }}
+                                className="flex-1 py-1 px-1 rounded-md bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-700/60 text-emerald-300 font-sports font-bold transition-colors flex items-center justify-center gap-0.5"
+                                title="Export standardized FIT 2.0 binary file (Strava/Garmin)"
+                              >
+                                <Download className="w-2.5 h-2.5 text-emerald-400" />
+                                <span>FIT</span>
+                              </button>
+
                               <button
                                 onClick={() => {
                                   exportRideToGpx({
@@ -1536,7 +1694,7 @@ export default function App() {
                                     breadcrumbs: ride.breadcrumbs || []
                                   });
                                 }}
-                                className="flex-1 py-1 px-2 rounded-md bg-zinc-800 hover:bg-blue-900/50 hover:text-blue-300 border border-zinc-700 text-zinc-300 font-sports font-bold transition-colors flex items-center justify-center gap-1"
+                                className="flex-1 py-1 px-1 rounded-md bg-zinc-800 hover:bg-blue-900/50 hover:text-blue-300 border border-zinc-700 text-zinc-300 font-sports font-bold transition-colors flex items-center justify-center gap-0.5"
                                 title="Export Strava GPX 1.1 file"
                               >
                                 <Download className="w-2.5 h-2.5 text-blue-400" />
@@ -1896,15 +2054,20 @@ export default function App() {
           />
 
           <StartActivityPrompt
-            isOpen={showStartPrompt && !isRecording && !activeSession}
+            isOpen={showStartPrompt && (!isRecording || isPaused)}
             activeRoute={activeRoute}
+            isResume={isResumePrompt}
             onStart={() => {
               setShowStartPrompt(false);
-              handleStartNewActivity();
+              if (isPaused || activeSession) {
+                handleToggleStartPause();
+              } else {
+                handleStartNewActivity();
+              }
             }}
             onDismiss={() => {
               setShowStartPrompt(false);
-              hasDismissedPromptRef.current = true;
+              lastPromptDismissedAtRef.current = Date.now();
             }}
           />
 
