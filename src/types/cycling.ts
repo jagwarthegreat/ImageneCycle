@@ -97,6 +97,11 @@ export interface RideMetrics {
   powerZoneName?: string | null; // e.g. 'Z2 Endurance'
   powerZoneColor?: string | null; // e.g. '#3b82f6'
   ftp: number; // Functional Threshold Power in Watts
+  hrZone?: number | null; // Karvonen Zone 1-5
+  hrZoneName?: string | null;
+  hrZoneColor?: string | null;
+  maxHeartRate?: number;
+  restingHeartRate?: number;
   isAutoPaused?: boolean;
   calories: number; // kcal
   vam: number; // m/h

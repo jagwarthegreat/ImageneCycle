@@ -6,9 +6,11 @@ import { calculateClimbProLiveState } from './utils/climbProEngine';
 import { bleManager } from './utils/bleManager';
 import { gpsService, GpsFix } from './utils/gpsService';
 import { bikeBeeper } from './utils/audioAlerts';
-import { getPowerZoneInfo, POWER_ZONES_CONFIG } from './utils/powerZones';
+import { getPowerZoneInfo, getHeartRateZoneInfo, POWER_ZONES_CONFIG, HR_ZONES_CONFIG } from './utils/powerZones';
 import { loadRideHistory, saveRideToHistory, deleteRideFromHistory, clearRideHistory, loadActiveSession, saveActiveSession, clearActiveSession } from './utils/rideHistory';
 import { exportRideToGpx, exportRideToJson, openStravaUpload } from './utils/rideExport';
+import { fetchLiveWeather, WeatherData } from './services/weatherService';
+import { captureStravaRedirectTokens, isStravaConnected, startStravaConnect, clearStravaTokens } from './utils/stravaAuth';
 import { MageneDevice } from './components/MageneDevice';
 import { BleSensorModal } from './components/BleSensorModal';
 import { ClimbManualInputModal } from './components/ClimbManualInputModal';
@@ -40,7 +42,9 @@ import {
   Flag,
   Share2,
   Download,
-  ExternalLink
+  ExternalLink,
+  Battery,
+  Heart
 } from 'lucide-react';
 
 export default function App() {
@@ -105,6 +109,41 @@ export default function App() {
       return 250;
     }
   });
+
+  // Heart rate zone anchors (Karvonen)
+  const [maxHeartRate, setMaxHeartRate] = useState<number>(() => {
+    if (typeof window === 'undefined') return 190;
+    try {
+      const val = localStorage.getItem('magene-user-max-hr');
+      return val ? parseInt(val, 10) : 190;
+    } catch {
+      return 190;
+    }
+  });
+  const [restingHeartRate, setRestingHeartRate] = useState<number>(() => {
+    if (typeof window === 'undefined') return 60;
+    try {
+      const val = localStorage.getItem('magene-user-resting-hr');
+      return val ? parseInt(val, 10) : 60;
+    } catch {
+      return 60;
+    }
+  });
+
+  // Battery Saver — 10s GPS + disable non-essential map animations
+  const [batterySaver, setBatterySaver] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem('magene-battery-saver') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [slidingVam, setSlidingVam] = useState(0);
+  const [stravaConnected, setStravaConnected] = useState(() => isStravaConnected());
 
   // GPS Coordinates & Live recorded breadcrumbs (restored from localStorage, immediately acquired from GPS)
   const [currentCoords, setCurrentCoords] = useState<{ lat: number; lng: number }>(() => {
@@ -197,6 +236,64 @@ export default function App() {
     } catch {}
   };
 
+  const handleSaveMaxHr = (v: number) => {
+    const safe = Math.max(120, Math.min(230, v));
+    setMaxHeartRate(safe);
+    try {
+      localStorage.setItem('magene-user-max-hr', safe.toString());
+    } catch {}
+  };
+
+  const handleSaveRestingHr = (v: number) => {
+    const safe = Math.max(30, Math.min(100, v));
+    setRestingHeartRate(safe);
+    try {
+      localStorage.setItem('magene-user-resting-hr', safe.toString());
+    } catch {}
+  };
+
+  const handleToggleBatterySaver = () => {
+    setBatterySaver(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('magene-battery-saver', next ? '1' : '0');
+      } catch {}
+      return next;
+    });
+  };
+
+  const fetchWeather = async (lat: number, lng: number) => {
+    if (!lat || !lng) return;
+    setWeatherLoading(true);
+    try {
+      const data = await fetchLiveWeather(lat, lng);
+      setWeather(data);
+    } catch {
+      // weatherService already falls back gracefully
+    } finally {
+      setWeatherLoading(false);
+    }
+  };
+
+  // Capture Strava OAuth redirect tokens
+  useEffect(() => {
+    if (captureStravaRedirectTokens()) {
+      setStravaConnected(true);
+    } else {
+      setStravaConnected(isStravaConnected());
+    }
+  }, []);
+
+  // Weather poll every 15 minutes from live GPS coords
+  useEffect(() => {
+    if (!currentCoords.lat || !currentCoords.lng) return;
+    fetchWeather(currentCoords.lat, currentCoords.lng);
+    const interval = setInterval(() => {
+      fetchWeather(currentCoords.lat, currentCoords.lng);
+    }, 15 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [currentCoords.lat, currentCoords.lng]);
+
   // Subscribe to real BLE hardware streams
   useEffect(() => {
     const unsub = bleManager.subscribe(data => {
@@ -252,6 +349,7 @@ export default function App() {
           localStorage.setItem('magene-last-known-gps', JSON.stringify({ lat: fix.lat, lng: fix.lng }));
         } catch {}
         setCurrentHeading(fix.heading);
+        setSlidingVam(fix.vam ?? gpsService.getSlidingVam());
 
         // Speed from GPS if BLE speed sensor is not connected
         if (!bleStatus.cscConnected) {
@@ -303,7 +401,8 @@ export default function App() {
         } else {
           bikeBeeper.beep(2600, 0.1);
         }
-      }
+      },
+      { batterySaver }
     );
 
     if (!success) {
@@ -317,7 +416,7 @@ export default function App() {
     return () => {
       gpsService.stopTracking();
     };
-  }, [isRecording, isPaused, bleStatus.cscConnected, activeSession]);
+  }, [isRecording, isPaused, bleStatus.cscConnected, activeSession, batterySaver]);
 
   // Prompt rider on initial GPS fix if no activity is running
   useEffect(() => {
@@ -444,10 +543,14 @@ export default function App() {
     prevClimbInRef.current = climbState.isInClimb;
   }, [climbState.isInClimb]);
 
-  // Real-Time Power Zone Calculation
+  // Real-Time Power & HR Zone Calculation
   const powerZoneInfo = useMemo(() => {
     return getPowerZoneInfo(power, ftp);
   }, [power, ftp]);
+
+  const hrZoneInfo = useMemo(() => {
+    return getHeartRateZoneInfo(heartRate, maxHeartRate, restingHeartRate);
+  }, [heartRate, maxHeartRate, restingHeartRate]);
 
   // Compiled metrics
   const metrics: RideMetrics = useMemo(() => {
@@ -455,10 +558,6 @@ export default function App() {
     const movingSecs = ridingTime || timeElapsed;
     const movingHours = movingSecs / 3600;
     const avgSpeed = movingHours > 0 ? totalDistKm / movingHours : speed;
-
-    const vam = movingHours > 0 && totalAscent > 0
-      ? Math.round((totalAscent / movingHours))
-      : Math.round(speed * 10 * Math.max(0, currentGrade));
 
     return {
       timeElapsed: movingSecs,
@@ -478,15 +577,20 @@ export default function App() {
       powerZoneName: powerZoneInfo?.name || null,
       powerZoneColor: powerZoneInfo?.color || null,
       ftp,
+      hrZone: hrZoneInfo?.zone || null,
+      hrZoneName: hrZoneInfo?.name || null,
+      hrZoneColor: hrZoneInfo?.color || null,
+      maxHeartRate,
+      restingHeartRate,
       isAutoPaused,
       calories: Math.round(movingSecs * 0.2),
-      vam,
+      vam: slidingVam,
       currentLat: currentCoords.lat,
       currentLng: currentCoords.lng,
       currentHeading,
       activeSessionId: activeSession?.id || null
     };
-  }, [ridingTime, saddleTime, timeElapsed, distanceTraveled, speed, maxSpeed, currentElevation, totalAscent, currentGrade, heartRate, cadence, power, powerZoneInfo, ftp, isAutoPaused, currentCoords, currentHeading, activeSession]);
+  }, [ridingTime, saddleTime, timeElapsed, distanceTraveled, speed, maxSpeed, currentElevation, totalAscent, currentGrade, heartRate, cadence, power, powerZoneInfo, hrZoneInfo, ftp, maxHeartRate, restingHeartRate, isAutoPaused, currentCoords, currentHeading, activeSession, slidingVam]);
 
   // Start New Activity Session
   const handleStartNewActivity = (customRouteName?: string) => {
@@ -790,6 +894,9 @@ export default function App() {
           liveBreadcrumbs={liveBreadcrumbs}
           onLocateMe={handleLocateMe}
           latestLapAlert={latestLapAlert}
+          weather={weather}
+          weatherLoading={weatherLoading}
+          batterySaver={batterySaver}
         />
       </div>
 
@@ -1223,9 +1330,69 @@ export default function App() {
                 </div>
               )}
 
-              {/* TAB 3: FTP & COGGAN POWER ZONES CONFIG */}
+              {/* TAB 3: FTP, HR ZONES, BATTERY SAVER, STRAVA */}
               {drawerTab === 'profile' && (
                 <div className="space-y-3 text-xs font-sports">
+                  {/* Battery Saver */}
+                  <div className="bg-zinc-850 p-3 rounded-xl border border-zinc-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-white uppercase text-xs flex items-center gap-1.5">
+                        <Battery className="w-4 h-4 text-emerald-400" />
+                        Battery Saver
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleToggleBatterySaver}
+                        className={`px-2.5 py-1 rounded-lg font-bold text-[11px] border transition-colors ${
+                          batterySaver
+                            ? 'bg-emerald-600 border-emerald-500 text-white'
+                            : 'bg-zinc-900 border-zinc-700 text-zinc-400'
+                        }`}
+                      >
+                        {batterySaver ? 'ON' : 'OFF'}
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-zinc-400">
+                      Disables map animations and polls GPS every 10s to preserve mobile battery on long rides.
+                    </p>
+                  </div>
+
+                  {/* Strava Connect */}
+                  <div className="bg-zinc-850 p-3 rounded-xl border border-zinc-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-white uppercase text-xs flex items-center gap-1.5">
+                        <Share2 className="w-4 h-4 text-orange-500" />
+                        Strava
+                      </span>
+                      <span className={`text-[10px] font-bold ${stravaConnected ? 'text-emerald-400' : 'text-zinc-500'}`}>
+                        {stravaConnected ? 'Connected' : 'Not connected'}
+                      </span>
+                    </div>
+                    {stravaConnected ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearStravaTokens();
+                          setStravaConnected(false);
+                        }}
+                        className="w-full py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 text-zinc-300 font-bold text-[11px]"
+                      >
+                        Disconnect
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={startStravaConnect}
+                        className="w-full py-1.5 rounded-lg bg-[#FC4C02] text-white font-bold text-[11px]"
+                      >
+                        Connect with Strava
+                      </button>
+                    )}
+                    <p className="text-[10px] text-zinc-400">
+                      Requires Express OAuth server (`npm run dev:server`) and Strava API credentials.
+                    </p>
+                  </div>
+
                   <div className="bg-zinc-850 p-3 rounded-xl border border-zinc-800 space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-white uppercase text-xs flex items-center gap-1.5">
@@ -1257,6 +1424,40 @@ export default function App() {
                     <p className="text-[10px] text-zinc-400">
                       Your 60-minute maximum sustainable power. Coggan zones are calculated dynamically below.
                     </p>
+                  </div>
+
+                  {/* HR Anchors */}
+                  <div className="bg-zinc-850 p-3 rounded-xl border border-zinc-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-white uppercase text-xs flex items-center gap-1.5">
+                        <Heart className="w-4 h-4 text-red-400" />
+                        Heart Rate Zones (Karvonen)
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <label className="space-y-1">
+                        <span className="text-[10px] text-zinc-400 uppercase">Max HR</span>
+                        <input
+                          type="number"
+                          min="120"
+                          max="230"
+                          value={maxHeartRate}
+                          onChange={e => handleSaveMaxHr(parseInt(e.target.value, 10) || 190)}
+                          className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1 font-digital font-bold text-center text-white text-xs"
+                        />
+                      </label>
+                      <label className="space-y-1">
+                        <span className="text-[10px] text-zinc-400 uppercase">Resting HR</span>
+                        <input
+                          type="number"
+                          min="30"
+                          max="100"
+                          value={restingHeartRate}
+                          onChange={e => handleSaveRestingHr(parseInt(e.target.value, 10) || 60)}
+                          className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1 font-digital font-bold text-center text-white text-xs"
+                        />
+                      </label>
+                    </div>
                   </div>
 
                   {/* Coggan 7-Zone Breakdown Table */}
@@ -1297,6 +1498,50 @@ export default function App() {
 
                             <div className="font-digital font-bold text-right text-xs">
                               <span>{minW} - {maxW}</span>
+                              {isCurrent && (
+                                <span className="block text-[9px] text-emerald-400 uppercase font-sports">ACTIVE</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Karvonen HR Zones */}
+                  <div className="space-y-1.5">
+                    <span className="font-bold text-xs text-zinc-400 uppercase">
+                      Heart Rate Zones (HRR)
+                    </span>
+                    <div className="space-y-1">
+                      {HR_ZONES_CONFIG.map(z => {
+                        const hrr = Math.max(1, maxHeartRate - restingHeartRate);
+                        const minBpm = Math.round(restingHeartRate + (z.minPct / 100) * hrr);
+                        const maxBpm = Math.round(restingHeartRate + (z.maxPct / 100) * hrr);
+                        const isCurrent = metrics.hrZone === z.zone;
+                        return (
+                          <div
+                            key={z.zone}
+                            className={`p-2 rounded-lg border flex items-center justify-between ${
+                              isCurrent
+                                ? 'bg-zinc-800 border-white ring-1 ring-white/50'
+                                : 'bg-zinc-850/60 border-zinc-800'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span
+                                className="w-2.5 h-2.5 rounded-full shrink-0"
+                                style={{ backgroundColor: z.color }}
+                              />
+                              <div>
+                                <div className="font-bold text-zinc-200">Z{z.zone} {z.name}</div>
+                                <div className="text-[10px] text-zinc-400">
+                                  {z.minPct}% – {z.maxPct}% HRR
+                                </div>
+                              </div>
+                            </div>
+                            <div className="font-digital font-bold text-right text-xs">
+                              {minBpm} – {maxBpm}
                               {isCurrent && (
                                 <span className="block text-[9px] text-emerald-400 uppercase font-sports">ACTIVE</span>
                               )}

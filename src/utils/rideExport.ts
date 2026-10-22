@@ -143,3 +143,61 @@ export function openStravaUpload() {
     window.open('https://www.strava.com/upload/select', '_blank', 'noopener,noreferrer');
   }
 }
+
+export interface StravaUploadResult {
+  id: number;
+  status: string;
+}
+
+/**
+ * Uploads a GPX (or other) activity file to Strava via multipart/form-data.
+ * Requires a valid OAuth access token with activity:write scope.
+ */
+export async function uploadToStrava(
+  file: Blob | File,
+  accessToken: string,
+  options?: { name?: string; description?: string; dataType?: 'gpx' }
+): Promise<StravaUploadResult> {
+  if (!accessToken) {
+    throw new Error('Strava access token is required');
+  }
+
+  const dataType = options?.dataType || 'gpx';
+  const form = new FormData();
+  const filename =
+    file instanceof File && file.name
+      ? file.name
+      : `magene_c706_ride.${dataType}`;
+  form.append('file', file, filename);
+  form.append('data_type', dataType);
+  if (options?.name) form.append('name', options.name);
+  if (options?.description) form.append('description', options.description);
+
+  const res = await fetch('https://www.strava.com/api/v3/uploads', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    },
+    body: form
+  });
+
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const errBody = await res.json();
+      detail = errBody?.message || JSON.stringify(errBody);
+    } catch {}
+    throw new Error(`Strava upload failed (${res.status}): ${detail}`);
+  }
+
+  const data = await res.json();
+  return {
+    id: data.id,
+    status: data.status || 'processing'
+  };
+}
+
+/** Build a GPX Blob suitable for uploadToStrava */
+export function rideToGpxBlob(ride: ExportableRideData): Blob {
+  return new Blob([buildGpxXml(ride)], { type: 'application/gpx+xml' });
+}

@@ -13,6 +13,7 @@ interface GpsMapViewProps {
   liveBreadcrumbs?: { lat: number; lng: number }[];
   routeName?: string;
   onLocateMe?: () => void;
+  batterySaver?: boolean;
 }
 
 export const GpsMapView: React.FC<GpsMapViewProps> = ({
@@ -22,7 +23,8 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   isDarkMode = false,
   liveBreadcrumbs = [],
   routeName,
-  onLocateMe
+  onLocateMe,
+  batterySaver = false
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -34,6 +36,10 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const endpointsRef = useRef<L.LayerGroup | null>(null);
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const hasCenteredInitiallyRef = useRef<boolean>(false);
+  const pendingBreadcrumbsRef = useRef<{ lat: number; lng: number }[] | null>(null);
+  const breadcrumbRafRef = useRef<number | null>(null);
+  const batterySaverRef = useRef(batterySaver);
+  batterySaverRef.current = batterySaver;
 
   // Map Navigation Modes (Matching real-world Magene C706 behavior)
   const [autoCenter, setAutoCenter] = useState<boolean>(true);
@@ -57,7 +63,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         zoom: 16,
         zoomControl: false,
         attributionControl: false,
-        fadeAnimation: true
+        fadeAnimation: !batterySaverRef.current
       });
 
       // User manual drag pauses auto-center temporarily
@@ -114,12 +120,15 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       }).addTo(map);
       breadcrumbPolylineRef.current = breadcrumbPolyline;
 
-      // 4. Custom GPS Location Puck with Heading Arrow
+      // 4. Custom GPS Location Puck with Heading Arrow (ping disabled in battery saver)
+      const pingHtml = batterySaverRef.current
+        ? ''
+        : `<div style="position: absolute; width: 34px; height: 34px; border-radius: 50%; background: rgba(37, 99, 235, 0.25); animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>`;
       const customPuckIcon = L.divIcon({
         className: 'gps-puck-wrapper',
         html: `
           <div style="position: relative; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;">
-            <div style="position: absolute; width: 34px; height: 34px; border-radius: 50%; background: rgba(37, 99, 235, 0.25); animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
+            ${pingHtml}
             <div style="width: 26px; height: 26px; border-radius: 50%; background: #ffffff; box-shadow: 0 2px 6px rgba(0,0,0,0.35); border: 2.5px solid #2563eb; display: flex; align-items: center; justify-content: center;">
               <svg id="gps-heading-needle" style="width: 15px; height: 15px; color: #2563eb; transform: rotate(0deg); transition: transform 0.15s linear;" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z" />
@@ -248,12 +257,26 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     }
   }, [routePoints, isDarkMode]);
 
-  // Update live breadcrumb trail
+  // Throttled live breadcrumb trail (rAF coalesce — keeps UI fluid as array grows)
   useEffect(() => {
-    if (breadcrumbPolylineRef.current && liveBreadcrumbs.length > 0) {
-      const pts = liveBreadcrumbs.map(b => [b.lat, b.lng] as [number, number]);
-      breadcrumbPolylineRef.current.setLatLngs(pts);
-    }
+    pendingBreadcrumbsRef.current = liveBreadcrumbs;
+    if (breadcrumbRafRef.current !== null) return;
+
+    breadcrumbRafRef.current = requestAnimationFrame(() => {
+      breadcrumbRafRef.current = null;
+      const latest = pendingBreadcrumbsRef.current;
+      if (breadcrumbPolylineRef.current && latest && latest.length > 0) {
+        const pts = latest.map(b => [b.lat, b.lng] as [number, number]);
+        breadcrumbPolylineRef.current.setLatLngs(pts);
+      }
+    });
+
+    return () => {
+      if (breadcrumbRafRef.current !== null) {
+        cancelAnimationFrame(breadcrumbRafRef.current);
+        breadcrumbRafRef.current = null;
+      }
+    };
   }, [liveBreadcrumbs]);
 
   // Update Position & Heading
@@ -261,6 +284,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     if (mapInstanceRef.current && markerRef.current) {
       const lat = currentPoint.lat;
       const lng = currentPoint.lng;
+      const animate = !batterySaver;
 
       if (lat !== undefined && lng !== undefined && !isNaN(lat) && !isNaN(lng)) {
         markerRef.current.setLatLng([lat, lng]);
@@ -275,16 +299,16 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         // On first valid fix, center with zoom 16
         if (!hasCenteredInitiallyRef.current && (lat !== 0 || lng !== 0)) {
           hasCenteredInitiallyRef.current = true;
-          mapInstanceRef.current.setView([lat, lng], 16, { animate: true });
+          mapInstanceRef.current.setView([lat, lng], 16, { animate });
         } else if (autoCenter) {
           mapInstanceRef.current.panTo([lat, lng], {
-            animate: true,
-            duration: 0.3
+            animate,
+            duration: animate ? 0.3 : 0
           });
         }
       }
     }
-  }, [currentPoint.lat, currentPoint.lng, heading, autoCenter, headingUpMode]);
+  }, [currentPoint.lat, currentPoint.lng, heading, autoCenter, headingUpMode, batterySaver]);
 
   // Toggle Auto-Center
   const handleToggleAutoCenter = () => {
@@ -294,7 +318,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       const lat = currentPoint.lat;
       const lng = currentPoint.lng;
       if (lat && lng) {
-        mapInstanceRef.current.setView([lat, lng], 16, { animate: true });
+        mapInstanceRef.current.setView([lat, lng], 16, { animate: !batterySaver });
       }
     }
   };
@@ -318,7 +342,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const handleLocateMe = () => {
     setAutoCenter(true);
     if (mapInstanceRef.current && currentPoint.lat && currentPoint.lng) {
-      mapInstanceRef.current.setView([currentPoint.lat, currentPoint.lng], 16, { animate: true });
+      mapInstanceRef.current.setView([currentPoint.lat, currentPoint.lng], 16, { animate: !batterySaver });
     }
     onLocateMe?.();
   };
@@ -328,7 +352,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       
       {/* ROTATING MAP CONTAINER (Matching real-world Magene C706 Heading-Up rotation) */}
       <div
-        className="w-[160%] h-[160%] -left-[30%] -top-[30%] absolute transition-transform duration-300 ease-out"
+        className={`w-[160%] h-[160%] -left-[30%] -top-[30%] absolute ${batterySaver ? '' : 'transition-transform duration-300 ease-out'}`}
         style={{
           transform: headingUpMode ? `rotate(${-heading}deg)` : 'rotate(0deg)',
           transformOrigin: 'center center'
@@ -343,7 +367,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
 
       {/* Street Name / Sector Label (Fixed Overlay) */}
       <div className="absolute top-2 left-3 bg-white/95 backdrop-blur-xs px-2.5 py-1 rounded-lg text-[11px] font-bold text-zinc-800 shadow-sm border border-zinc-200 z-[400] flex items-center gap-1.5 max-w-[210px]">
-        <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse shrink-0" />
+        <span className={`w-2 h-2 rounded-full bg-blue-600 shrink-0 ${batterySaver ? '' : 'animate-pulse'}`} />
         <span className="truncate">
           {routeName || (currentPoint.lat ? `${currentPoint.lat.toFixed(4)}°, ${currentPoint.lng.toFixed(4)}°` : 'Current Location')}
         </span>

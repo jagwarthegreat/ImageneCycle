@@ -1,53 +1,19 @@
-import React, { useEffect, useState } from 'react';
-import { Sun, Cloud, CloudSun, CloudRain, CloudLightning, CloudDrizzle, Wind } from 'lucide-react';
-import { fetchLiveWeather, WeatherData } from '../services/weatherService';
+import React, { useState } from 'react';
+import { Sun, Cloud, CloudSun, CloudRain, CloudLightning, CloudDrizzle } from 'lucide-react';
+import { WeatherData } from '../services/weatherService';
 
 interface WeatherBadgeProps {
-  lat?: number;
-  lng?: number;
+  weather?: WeatherData | null;
+  loading?: boolean;
   isDarkMode?: boolean;
 }
 
 export const WeatherBadge: React.FC<WeatherBadgeProps> = ({
-  lat,
-  lng,
+  weather = null,
+  loading = false,
   isDarkMode = false
 }) => {
-  const [weather, setWeather] = useState<WeatherData | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
   const [showDetails, setShowDetails] = useState<boolean>(false);
-
-  useEffect(() => {
-    if (!lat || !lng) return;
-
-    let isMounted = true;
-    setLoading(true);
-
-    fetchLiveWeather(lat, lng)
-      .then(data => {
-        if (isMounted) {
-          setWeather(data);
-          setLoading(false);
-        }
-      })
-      .catch(() => {
-        if (isMounted) setLoading(false);
-      });
-
-    // Refresh every 10 minutes
-    const interval = setInterval(() => {
-      if (lat && lng) {
-        fetchLiveWeather(lat, lng).then(data => {
-          if (isMounted) setWeather(data);
-        });
-      }
-    }, 10 * 60 * 1000);
-
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
-  }, [lat, lng]);
 
   if (loading && !weather) {
     return (
@@ -62,7 +28,6 @@ export const WeatherBadge: React.FC<WeatherBadgeProps> = ({
 
   if (!weather) return null;
 
-  // Icon mapping
   const getWeatherIcon = (code: number, isRaining: boolean) => {
     if (code >= 95) return <CloudLightning className="w-3 h-3 text-amber-400 shrink-0" />;
     if (isRaining || code >= 61) return <CloudRain className="w-3 h-3 text-cyan-400 shrink-0" />;
@@ -72,7 +37,6 @@ export const WeatherBadge: React.FC<WeatherBadgeProps> = ({
     return <Cloud className="w-3 h-3 text-zinc-400 shrink-0" />;
   };
 
-  // Color coding for rain probability
   const rainProbColor =
     weather.rainProbability >= 50
       ? 'text-cyan-400 font-bold'
@@ -94,12 +58,11 @@ export const WeatherBadge: React.FC<WeatherBadgeProps> = ({
         {getWeatherIcon(weather.weatherCode, weather.isRaining)}
         <span className="font-digital font-bold text-xs">{weather.tempC}°</span>
         <span className="text-zinc-400">·</span>
-        <span className={rainProbColor}>{weather.rainProbability}% rain</span>
+        <span className={rainProbColor}>{weather.rainProbability}%</span>
       </button>
 
-      {/* Mini Details Popover */}
       {showDetails && (
-        <div 
+        <div
           className="absolute top-full mt-1.5 left-0 z-[600] w-48 bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-xs text-white shadow-xl animate-in fade-in duration-150"
           onClick={() => setShowDetails(false)}
         >
@@ -117,10 +80,6 @@ export const WeatherBadge: React.FC<WeatherBadgeProps> = ({
             <div className="flex items-center justify-between">
               <span>Wind Speed:</span>
               <span className="text-zinc-200">{weather.windSpeedKmh} km/h</span>
-            </div>
-            <div className="flex items-center justify-between text-[9px] text-zinc-500 pt-1 border-t border-zinc-800">
-              <span>GPS Weather</span>
-              <span>Tap to dismiss</span>
             </div>
           </div>
         </div>

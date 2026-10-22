@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 
 import { RoutePoint, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert } from '../types/cycling';
+import { WeatherData } from '../services/weatherService';
 
 interface MageneDeviceProps {
   metrics: RideMetrics;
@@ -46,6 +47,9 @@ interface MageneDeviceProps {
   routeName?: string;
   onLocateMe?: () => void;
   latestLapAlert?: AutoLapAlert | null;
+  weather?: WeatherData | null;
+  weatherLoading?: boolean;
+  batterySaver?: boolean;
 }
 
 export const MageneDevice: React.FC<MageneDeviceProps> = ({
@@ -67,7 +71,10 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   liveBreadcrumbs = [],
   routeName,
   onLocateMe,
-  latestLapAlert
+  latestLapAlert,
+  weather = null,
+  weatherLoading = false,
+  batterySaver = false
 }) => {
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
@@ -155,8 +162,8 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
         <div className="flex items-center gap-2">
           {/* Live GPS Weather Condition Indicator */}
           <WeatherBadge
-            lat={currentPoint.lat}
-            lng={currentPoint.lng}
+            weather={weather}
+            loading={weatherLoading}
             isDarkMode={isDarkMode}
           />
 
@@ -276,6 +283,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 liveBreadcrumbs={liveBreadcrumbs}
                 routeName={routeName}
                 onLocateMe={onLocateMe}
+                batterySaver={batterySaver}
               />
             </div>
 
@@ -433,6 +441,38 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 <span className="font-digital text-[28px] sm:text-[32px] font-bold leading-none mt-1">
                   {metrics.heartRate !== null ? metrics.heartRate : '--'} <span className="text-xs text-zinc-400">bpm</span>
                 </span>
+                {metrics.hrZone ? (
+                  <div className="mt-1 flex flex-col items-center">
+                    <span
+                      className="text-[9px] font-sports font-bold px-1.5 py-0.5 rounded text-white"
+                      style={{ backgroundColor: metrics.hrZoneColor || '#ef4444' }}
+                    >
+                      {metrics.hrZoneName}
+                    </span>
+                    <div className="flex items-center gap-0.5 mt-1">
+                      {[1, 2, 3, 4, 5].map(z => (
+                        <div
+                          key={z}
+                          className={`w-2.5 h-1 rounded-full ${
+                            metrics.hrZone === z ? 'scale-y-125' : 'opacity-25'
+                          }`}
+                          style={{
+                            backgroundColor:
+                              z === 1 ? '#94a3b8' :
+                              z === 2 ? '#3b82f6' :
+                              z === 3 ? '#22c55e' :
+                              z === 4 ? '#eab308' :
+                              '#ef4444'
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <span className="text-[9px] font-sports text-zinc-400 mt-1">
+                    Max {metrics.maxHeartRate ?? 190} · Rest {metrics.restingHeartRate ?? 60}
+                  </span>
+                )}
               </div>
               <div className="flex flex-col items-center">
                 <span className="text-[10px] font-sports font-bold text-zinc-400 uppercase flex items-center gap-1">
@@ -548,6 +588,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 liveBreadcrumbs={liveBreadcrumbs}
                 routeName={routeName}
                 onLocateMe={onLocateMe}
+                batterySaver={batterySaver}
               />
             </div>
           </div>

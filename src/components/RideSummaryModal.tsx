@@ -19,7 +19,8 @@ import {
   FileCode
 } from 'lucide-react';
 import { RideMetrics } from '../types/cycling';
-import { exportRideToGpx, exportRideToJson, openStravaUpload } from '../utils/rideExport';
+import { exportRideToGpx, exportRideToJson, openStravaUpload, uploadToStrava, rideToGpxBlob } from '../utils/rideExport';
+import { getValidStravaAccessToken, isStravaConnected, startStravaConnect } from '../utils/stravaAuth';
 
 interface RideSummaryModalProps {
   isOpen: boolean;
@@ -49,6 +50,8 @@ export const RideSummaryModal: React.FC<RideSummaryModalProps> = ({
   });
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [stravaUploading, setStravaUploading] = useState(false);
+  const [stravaConnected, setStravaConnected] = useState(() => isStravaConnected());
 
   const handleExportGpx = () => {
     exportRideToGpx({
@@ -86,6 +89,49 @@ export const RideSummaryModal: React.FC<RideSummaryModalProps> = ({
     });
     setExportNotice('Full telemetry JSON file downloaded!');
     setTimeout(() => setExportNotice(null), 3500);
+  };
+
+  const buildExportPayload = () => ({
+    routeName: customTitle || routeName,
+    startedAt,
+    timeElapsed: metrics.timeElapsed,
+    ridingTimeSeconds: metrics.ridingTime || metrics.timeElapsed,
+    saddleTimeSeconds: metrics.saddleTime,
+    distanceMeters: metrics.distanceTraveled,
+    totalAscentMeters: metrics.totalAscent,
+    avgSpeedKmh: metrics.avgSpeed,
+    maxSpeedKmh: metrics.maxSpeed,
+    calories: metrics.calories,
+    avgPowerWatts: metrics.power,
+    breadcrumbs
+  });
+
+  const handleUploadToStravaApi = async () => {
+    if (!stravaConnected) {
+      startStravaConnect();
+      return;
+    }
+    setStravaUploading(true);
+    try {
+      const token = await getValidStravaAccessToken();
+      if (!token) {
+        setStravaConnected(false);
+        setExportNotice('Strava session expired — reconnect and try again.');
+        setTimeout(() => setExportNotice(null), 3500);
+        return;
+      }
+      const blob = rideToGpxBlob(buildExportPayload());
+      const result = await uploadToStrava(blob, token, {
+        name: customTitle || routeName,
+        dataType: 'gpx'
+      });
+      setExportNotice(`Uploaded to Strava (id ${result.id}). ${result.status}`);
+    } catch (err) {
+      setExportNotice(err instanceof Error ? err.message : 'Strava upload failed');
+    } finally {
+      setStravaUploading(false);
+      setTimeout(() => setExportNotice(null), 4500);
+    }
   };
 
   if (!isOpen) return null;
@@ -318,7 +364,23 @@ export const RideSummaryModal: React.FC<RideSummaryModalProps> = ({
                 </button>
               </div>
 
-              {/* Direct Strava Upload Web Link */}
+              <button
+                type="button"
+                onClick={handleUploadToStravaApi}
+                disabled={stravaUploading}
+                className="w-full py-2 px-2 rounded-lg bg-[#FC4C02] hover:bg-[#e04402] disabled:opacity-60 text-white text-[11px] font-sports font-bold flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <Share2 className="w-3.5 h-3.5" />
+                <span>
+                  {stravaUploading
+                    ? 'Uploading…'
+                    : stravaConnected
+                    ? 'Upload GPX to Strava'
+                    : 'Connect Strava & Upload'}
+                </span>
+              </button>
+
+              {/* Direct Strava Upload Web Link fallback */}
               <button
                 type="button"
                 onClick={openStravaUpload}

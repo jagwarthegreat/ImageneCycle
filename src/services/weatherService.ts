@@ -18,7 +18,7 @@ export interface WeatherData {
 // In-memory cache to prevent excessive requests
 let cachedWeather: WeatherData | null = null;
 let lastFetchCoords: { lat: number; lng: number } | null = null;
-const CACHE_DURATION_MS = 10 * 60 * 1000; // 10 minutes
+const CACHE_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
 /**
  * Translates WMO weather codes to human-readable condition text
