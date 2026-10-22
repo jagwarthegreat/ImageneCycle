@@ -4,7 +4,7 @@ import { RouteData, RoutePoint, ClimbSegment, RideMetrics, BleDeviceStatus, GpsS
 import { parseGpxRoute } from './data/routes';
 import { calculateClimbProLiveState } from './utils/climbProEngine';
 import { bleManager } from './utils/bleManager';
-import { gpsService, GpsFix, accuracyToQuality } from './utils/gpsService';
+import { gpsService, GpsFix, accuracyToQuality, FAST_GEO_OPTIONS } from './utils/gpsService';
 import { bikeBeeper } from './utils/audioAlerts';
 import { getPowerZoneInfo, getHeartRateZoneInfo, POWER_ZONES_CONFIG, HR_ZONES_CONFIG } from './utils/powerZones';
 import { loadRideHistory, saveRideToHistory, deleteRideFromHistory, clearRideHistory, loadActiveSession, saveActiveSession, clearActiveSession } from './utils/rideHistory';
@@ -180,11 +180,20 @@ export default function App() {
     return s && s.breadcrumbs ? s.breadcrumbs : [];
   });
 
-  // GPS Device Status
-  const [gpsStatus, setGpsStatus] = useState<GpsStatus>({
-    hasFix: false,
-    accuracy: 0,
-    quality: 'Searching...'
+  // GPS Device Status — seed Weak from last-known so HUD is never cold Searching on reopen
+  const [gpsStatus, setGpsStatus] = useState<GpsStatus>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('magene-last-known-gps');
+        if (saved) {
+          const parsed = JSON.parse(saved) as { lat?: number; lng?: number };
+          if (Number.isFinite(parsed.lat) && Number.isFinite(parsed.lng)) {
+            return { hasFix: true, accuracy: 100, quality: 'Weak' };
+          }
+        }
+      } catch {}
+    }
+    return { hasFix: false, accuracy: 0, quality: 'Searching...' };
   });
   const [isOnline, setIsOnline] = useState(
     () => typeof navigator === 'undefined' || navigator.onLine
@@ -345,33 +354,40 @@ export default function App() {
     return unsub;
   }, []);
 
-  // Immediate One-Shot Geolocation Acquisition on Mount
+  // Fast warm-start: network/A-GPS cache (precise upgrade comes from gpsService watch)
   useEffect(() => {
-    if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const { latitude, longitude, altitude, accuracy, heading } = pos.coords;
-          const coords = { lat: latitude, lng: longitude };
-          setCurrentCoords(coords);
-          try {
-            localStorage.setItem('magene-last-known-gps', JSON.stringify(coords));
-          } catch {}
-          if (altitude && altitude > 0) setCurrentElevation(Math.round(altitude));
-          if (heading && !isNaN(heading)) setCurrentHeading(heading);
-          const acc = accuracy || 999;
-          setGpsStatus({
-            hasFix: acc <= 80,
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude, altitude, accuracy, heading } = pos.coords;
+        const coords = { lat: latitude, lng: longitude };
+        setCurrentCoords(coords);
+        try {
+          localStorage.setItem('magene-last-known-gps', JSON.stringify(coords));
+        } catch {}
+        if (altitude && altitude > 0) setCurrentElevation(Math.round(altitude));
+        if (heading != null && !isNaN(heading)) setCurrentHeading(heading);
+        const acc = accuracy || 999;
+        setGpsStatus(prev => {
+          // Do not downgrade an already-better watch fix
+          const rank = (q: string) =>
+            q === 'GPS 3D' ? 3 : q === 'GPS 2D' ? 2 : q === 'Weak' ? 1 : 0;
+          const nextQ = accuracyToQuality(acc);
+          if (rank(nextQ) < rank(prev.quality)) return prev;
+          return {
+            hasFix: true,
             accuracy: acc,
-            quality: accuracyToQuality(acc)
-          });
-        },
-        (err) => {
-          console.warn('Initial geolocation:', err.message);
-          setGpsStatus(prev => ({ ...prev, quality: 'Searching...' }));
-        },
-        { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 }
-      );
-    }
+            quality: nextQ
+          };
+        });
+      },
+      (err) => {
+        console.warn('Fast geolocation:', err.message);
+        // Keep last-known Weak if we already seeded it — do not force Searching
+        setGpsStatus(prev => (prev.hasFix || prev.quality === 'Weak' ? prev : { ...prev, quality: 'Searching...' }));
+      },
+      FAST_GEO_OPTIONS
+    );
   }, []);
 
   useEffect(() => {
@@ -387,15 +403,29 @@ export default function App() {
 
   // Real Production GPS Tracker with Auto-Pause (<0.5 km/h for >5s) and Auto-Resume
   useEffect(() => {
-    setGpsStatus(prev => ({ ...prev, quality: 'Searching...' }));
+    // Only show Searching on cold start — do not wipe Weak/2D/3D when tracker restarts
+    setGpsStatus(prev => {
+      if (prev.hasFix || prev.quality === 'Weak' || prev.quality === 'GPS 2D' || prev.quality === 'GPS 3D') {
+        return prev;
+      }
+      return { ...prev, quality: 'Searching...' };
+    });
 
     const success = gpsService.startTracking(
       (fix: GpsFix, deltaDist: number, instantGrade: number) => {
         const quality = fix.quality || accuracyToQuality(fix.accuracy);
-        setGpsStatus({
-          hasFix: !fix.displayOnly || fix.accuracy < 200,
-          accuracy: fix.accuracy,
-          quality
+        setGpsStatus(prev => {
+          const rank = (q: string) =>
+            q === 'GPS 3D' ? 3 : q === 'GPS 2D' ? 2 : q === 'Weak' ? 1 : 0;
+          // displayOnly / worse accuracy must not knock a good lock back to Searching/Weak flash
+          if (fix.displayOnly && rank(quality) < rank(prev.quality)) {
+            return { ...prev, hasFix: true, accuracy: Math.min(prev.accuracy || fix.accuracy, fix.accuracy) };
+          }
+          return {
+            hasFix: !fix.displayOnly || fix.accuracy < 200,
+            accuracy: fix.accuracy,
+            quality
+          };
         });
 
         setCurrentCoords({ lat: fix.lat, lng: fix.lng });

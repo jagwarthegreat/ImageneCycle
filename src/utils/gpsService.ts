@@ -59,9 +59,21 @@ export function accuracyToQuality(accuracy: number): GpsFix['quality'] {
 const VAM_WINDOW_MS = 30_000;
 const BATTERY_SAVER_INTERVAL_MS = 10_000;
 const GPS_TIMEOUT_MS = 25_000;
+/** Accept briefly cached high-accuracy fixes so watch is not cold every time */
+const WATCH_MAX_AGE_MS = 5_000;
+/** Network / A-GPS warm fix for instant HUD (displayOnly until accuracy improves) */
+const FAST_FIX_MAX_AGE_MS = 60_000;
+const FAST_FIX_TIMEOUT_MS = 5_000;
 const WARMUP_MAX_ACC_M = 50;
 const TRACKING_MAX_ACC_M = 80;
 const MAX_JUMP_KMH = 80;
+
+/** Low-accuracy cached options for instant first paint */
+export const FAST_GEO_OPTIONS: PositionOptions = {
+  enableHighAccuracy: false,
+  maximumAge: FAST_FIX_MAX_AGE_MS,
+  timeout: FAST_FIX_TIMEOUT_MS
+};
 
 class GpsService {
   private watchId: number | null = null;
@@ -128,6 +140,15 @@ class GpsService {
       }
     }, 1000);
 
+    // Instant warm path: network/A-GPS cache (displayOnly if accuracy still poor)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => this.handlePosition(pos),
+      () => {
+        /* ignore — watch/poll continues */
+      },
+      FAST_GEO_OPTIONS
+    );
+
     if (this.batterySaver) {
       const poll = () => {
         navigator.geolocation.getCurrentPosition(
@@ -142,7 +163,7 @@ class GpsService {
       this.watchId = navigator.geolocation.watchPosition(
         (pos) => this.handlePosition(pos),
         (err) => this.handleError(err),
-        this.geoOptions(0)
+        this.geoOptions(WATCH_MAX_AGE_MS)
       );
     }
 
