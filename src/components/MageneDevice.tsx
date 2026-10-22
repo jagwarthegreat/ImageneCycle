@@ -22,8 +22,7 @@ import {
   Square,
   CornerUpLeft,
   CornerUpRight,
-  ArrowUp,
-  Navigation2
+  ArrowUp
 } from 'lucide-react';
 
 import { RoutePoint, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert, RouteTurn } from '../types/cycling';
@@ -77,12 +76,40 @@ function formatClock12h(d: Date): string {
   return `${h}:${pad(m)}:${pad(s)} ${ampm}`;
 }
 
-function NextTurnGlyph({ turn }: { turn: RouteTurn }) {
+function NextTurnGlyph({ turn, className = 'w-4 h-4' }: { turn: RouteTurn; className?: string }) {
   const mod = turn.modifier || '';
-  if (turn.maneuverType === 'arrive') return <Flag className="w-4 h-4 text-white shrink-0" />;
-  if (mod.includes('left')) return <CornerUpLeft className="w-4 h-4 text-white shrink-0" />;
-  if (mod.includes('right')) return <CornerUpRight className="w-4 h-4 text-white shrink-0" />;
-  return <ArrowUp className="w-4 h-4 text-white shrink-0" />;
+  const cn = `${className} text-white shrink-0`;
+  if (turn.maneuverType === 'arrive') return <Flag className={cn} />;
+  if (mod.includes('left')) return <CornerUpLeft className={cn} />;
+  if (mod.includes('right')) return <CornerUpRight className={cn} />;
+  return <ArrowUp className={cn} />;
+}
+
+/** Compact square next-turn cue — bottom-left of map */
+function NextTurnSquare({
+  cue,
+  formatDist
+}: {
+  cue: NonNullable<ReturnType<typeof getNextTurn>>;
+  formatDist: (m: number) => string;
+}) {
+  return (
+    <div className="absolute bottom-2 left-2 z-[450] pointer-events-none">
+      <div className="w-[72px] h-[72px] bg-blue-600/95 text-white rounded-xl shadow-lg border border-white/30 flex flex-col items-center justify-between px-1 py-1.5 overflow-hidden">
+        <div className="w-7 h-7 rounded-md bg-white/20 flex items-center justify-center shrink-0">
+          <NextTurnGlyph turn={cue.turn} className="w-4 h-4" />
+        </div>
+        <div className="font-digital font-bold text-[11px] leading-none shrink-0 mt-1">
+          {formatDist(cue.metersToManeuver)}
+        </div>
+        <div className="w-full min-h-0 flex-1 overflow-x-auto touch-pan-x overscroll-x-contain [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden pointer-events-auto">
+          <div className="whitespace-nowrap text-[8px] font-sports font-bold leading-tight text-center px-0.5">
+            {cue.turn.instruction}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export const MageneDevice: React.FC<MageneDeviceProps> = ({
@@ -356,27 +383,9 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 fitRouteToken={fitRouteToken}
                 basemapToken={basemapToken}
               />
-              {/* Live next-turn cue (OSRM steps) */}
+              {/* Live next-turn cue (square, bottom-left) */}
               {nextTurnCue && (
-                <div className="absolute bottom-2 left-2 right-2 z-[450] pointer-events-none">
-                  <div className="bg-blue-600/95 text-white rounded-xl px-2.5 py-2 shadow-lg border border-white/30 flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
-                      <NextTurnGlyph turn={nextTurnCue.turn} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[9px] font-sports font-bold uppercase tracking-wider text-blue-100 flex items-center gap-1">
-                        <Navigation2 className="w-2.5 h-2.5" />
-                        Next turn
-                      </div>
-                      <div className="text-[11px] font-sports font-bold truncate leading-tight">
-                        {nextTurnCue.turn.instruction}
-                      </div>
-                    </div>
-                    <div className="font-digital font-bold text-sm shrink-0">
-                      {formatTurnDist(nextTurnCue.metersToManeuver)}
-                    </div>
-                  </div>
-                </div>
+                <NextTurnSquare cue={nextTurnCue} formatDist={formatTurnDist} />
               )}
             </div>
 
@@ -718,24 +727,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 basemapToken={basemapToken}
               />
               {nextTurnCue && (
-                <div className="absolute bottom-3 left-2 right-2 z-[450] pointer-events-none">
-                  <div className="bg-blue-600/95 text-white rounded-xl px-2.5 py-2.5 shadow-lg border border-white/30 flex items-center gap-2">
-                    <div className="w-9 h-9 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
-                      <NextTurnGlyph turn={nextTurnCue.turn} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[9px] font-sports font-bold uppercase tracking-wider text-blue-100">
-                        Next turn
-                      </div>
-                      <div className="text-xs font-sports font-bold truncate">
-                        {nextTurnCue.turn.instruction}
-                      </div>
-                    </div>
-                    <div className="font-digital font-bold text-base shrink-0">
-                      {formatTurnDist(nextTurnCue.metersToManeuver)}
-                    </div>
-                  </div>
-                </div>
+                <NextTurnSquare cue={nextTurnCue} formatDist={formatTurnDist} />
               )}
             </div>
           </div>

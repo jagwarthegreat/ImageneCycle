@@ -457,32 +457,45 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         />
       </div>
 
-      {/* Street Name / Sector Label (Fixed Overlay) */}
-      <div className="absolute top-2 left-3 bg-white/95 backdrop-blur-xs px-2.5 py-1 rounded-lg text-[11px] font-bold text-zinc-800 shadow-sm border border-zinc-200 z-[400] flex items-center gap-1.5 max-w-[210px]">
-        <span className={`w-2 h-2 rounded-full bg-blue-600 shrink-0 ${batterySaver ? '' : 'animate-pulse'}`} />
-        <span className="truncate">
-          {routeName || (currentPoint.lat ? `${currentPoint.lat.toFixed(4)}°, ${currentPoint.lng.toFixed(4)}°` : 'Current Location')}
-        </span>
+      {/* Top strip: route + swipeable basemap status (keeps map center clear) */}
+      <div className="absolute top-1 left-2 right-12 z-[400] flex items-center gap-1.5 min-w-0 pointer-events-auto">
+        <div className="bg-white/95 backdrop-blur-xs px-2 py-0.5 rounded-md text-[10px] font-bold text-zinc-800 shadow-sm border border-zinc-200 flex items-center gap-1.5 shrink-0 max-w-[42%]">
+          <span className={`w-1.5 h-1.5 rounded-full bg-blue-600 shrink-0 ${batterySaver ? '' : 'animate-pulse'}`} />
+          <span className="truncate">
+            {routeName || (currentPoint.lat ? `${currentPoint.lat.toFixed(4)}°, ${currentPoint.lng.toFixed(4)}°` : 'Current Location')}
+          </span>
+        </div>
+        {(basemapError || offlineMapReady !== null) && (
+          <div
+            className={`min-w-0 flex-1 overflow-x-auto touch-pan-x overscroll-x-contain rounded-md shadow-sm border [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
+              basemapError
+                ? 'bg-rose-50/95 border-rose-300 text-rose-900'
+                : offlineMapReady
+                ? 'bg-emerald-50/90 border-emerald-300 text-emerald-800'
+                : 'bg-amber-50/95 border-amber-300 text-amber-900'
+            }`}
+          >
+            <div
+              className={`whitespace-nowrap px-1.5 py-0.5 font-sports font-semibold leading-none ${
+                basemapError
+                  ? 'text-[9px]'
+                  : offlineMapReady
+                  ? 'text-[8px] font-bold uppercase tracking-wider'
+                  : 'text-[8px]'
+              }`}
+            >
+              {basemapError
+                ? basemapError
+                : offlineMapReady
+                ? `${activePackName || 'Offline'} map`
+                : 'World overview — Download Maps for offline (OSM)'}
+            </div>
+          </div>
+        )}
       </div>
 
-      {basemapError && (
-        <div className="absolute top-10 left-3 right-14 z-[400] bg-rose-50/95 border border-rose-300 text-rose-900 text-[10px] font-sports font-semibold px-2 py-1 rounded-lg shadow-sm">
-          {basemapError}
-        </div>
-      )}
-      {!basemapError && offlineMapReady === false && (
-        <div className="absolute top-10 left-3 right-14 z-[400] bg-amber-50/95 border border-amber-300 text-amber-900 text-[10px] font-sports font-semibold px-2 py-1 rounded-lg shadow-sm">
-          World overview — open Download Maps to save a country offline (OpenStreetMap)
-        </div>
-      )}
-      {!basemapError && offlineMapReady === true && (
-        <div className="absolute top-10 left-3 z-[400] bg-emerald-50/90 border border-emerald-300 text-emerald-800 text-[9px] font-sports font-bold px-1.5 py-0.5 rounded shadow-sm uppercase tracking-wider">
-          {activePackName || 'Offline'} map
-        </div>
-      )}
-
-      {/* Scale Indicator */}
-      <div className="absolute bottom-2 left-3 pointer-events-none flex flex-col items-start z-[400]">
+      {/* Scale — sits right of bottom-left next-turn square */}
+      <div className="absolute bottom-2 left-[5.25rem] pointer-events-none flex flex-col items-start z-[400]">
         <span className="text-[10px] font-digital font-bold text-zinc-800 leading-none drop-shadow-xs">
           200m
         </span>
