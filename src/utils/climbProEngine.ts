@@ -1,5 +1,10 @@
 import { RoutePoint, ClimbSegment, ProfileSlice, ClimbCategory, ClimbProLiveState } from '../types/cycling';
 
+/** Route ClimbPro (planned) + Freeride ClimbPro (live): same classify gates. Score = length_m × avg_grade_%. */
+export const CLIMB_MIN_LENGTH_M = 400;
+export const CLIMB_MIN_AVG_GRADE = 2.5;
+export const CLIMB_START_GRADE = 2.5;
+
 /**
  * Standard Grade Color Mapping (consistent with Garmin / Magene / Wahoo ClimbPro conventions):
  * < 3%: Green (Mild / False flat)
@@ -66,8 +71,9 @@ export function generateProfileSlices(points: RoutePoint[]): ProfileSlice[] {
 }
 
 /**
- * Auto-detects climbs from a sequence of route points.
- * Standard criteria: minimum 400m length, avg grade >= 2.8%, elevation gain >= 25m.
+ * Route ClimbPro: detect climbs on a pre-planned course.
+ * Gates: length >= 400m and avg grade >= 2.5%. Climb Score = length × avgGrade.
+ * Short hills (<400m) and false flats (<2.5%) are ignored.
  */
 export function detectClimbsFromPoints(points: RoutePoint[]): ClimbSegment[] {
   if (points.length < 10) return [];
@@ -83,8 +89,7 @@ export function detectClimbsFromPoints(points: RoutePoint[]): ClimbSegment[] {
     const dDist = curr.distFromStart - prev.distFromStart;
     const instantaneousGrade = dDist > 0 ? (dEle / dDist) * 100 : 0;
 
-    // Detect climb start when sustained grade >= 2.5%
-    if (climbStartIndex === -1 && instantaneousGrade >= 2.5) {
+    if (climbStartIndex === -1 && instantaneousGrade >= CLIMB_START_GRADE) {
       climbStartIndex = i - 1;
       runningAscent = Math.max(0, dEle);
     } else if (climbStartIndex !== -1) {
@@ -92,13 +97,10 @@ export function detectClimbsFromPoints(points: RoutePoint[]): ClimbSegment[] {
         runningAscent += dEle;
       }
 
-      // Check if climb has ended: either downhill slope < -1.5% for > 200m or route ends
-      const distFromStartOfClimb = curr.distFromStart - points[climbStartIndex].distFromStart;
       const isRouteEnd = i === points.length - 1;
       const isDescent = instantaneousGrade < -2.0 && (i > climbStartIndex + 5);
 
       if (isDescent || isRouteEnd) {
-        // Validate if this segment meets minimum climb threshold
         const startPt = points[climbStartIndex];
         const endPt = isRouteEnd ? curr : points[i - 1];
         const length = endPt.distFromStart - startPt.distFromStart;
@@ -106,7 +108,7 @@ export function detectClimbsFromPoints(points: RoutePoint[]): ClimbSegment[] {
         const avgGrade = length > 0 ? (totalGain / length) * 100 : 0;
         const climbScore = length * avgGrade;
 
-        if (length >= 400 && totalGain >= 25 && avgGrade >= 2.8) {
+        if (length >= CLIMB_MIN_LENGTH_M && avgGrade >= CLIMB_MIN_AVG_GRADE) {
           const climbPoints = points.slice(climbStartIndex, i);
           const maxGrade = Math.max(...climbPoints.map(p => p.grade || 0));
 

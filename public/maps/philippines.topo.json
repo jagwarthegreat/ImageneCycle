@@ -1,0 +1,23 @@
+{
+  "format": "magene-topo-v1",
+  "id": "ph",
+  "name": "Philippines",
+  "fileHint": "ph - Philippines.topo.json",
+  "bbox": {
+    "minLat": 4.0,
+    "maxLat": 21.5,
+    "minLng": 116.0,
+    "maxLng": 127.0
+  },
+  "elevation": {
+    "source": "route-embedded",
+    "demPmtiles": null,
+    "demNote": "Country-wide DEM is not shipped. Climb elevation uses saved routes. Optional DEM: host /maps/packs/philippines.elv.pmtiles for download later."
+  },
+  "notes": [
+    "Magene Topographic Data pack (not Guru .elv).",
+    "Marks Topographic Data as installed for MNT parity with Guru Maps Storage.",
+    "Per-route elevation profiles remain the primary offline elev source."
+  ],
+  "updatedAt": "2026-03-22"
+}

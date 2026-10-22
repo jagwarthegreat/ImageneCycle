@@ -1,0 +1,189 @@
+{
+  "version": 3,
+  "worldBasemap": "online",
+  "packs": [
+    {
+      "id": "ph",
+      "name": "Philippines",
+      "bbox": { "minLat": 4.0, "maxLat": 21.5, "minLng": 116.0, "maxLng": 127.0 },
+      "layers": {
+        "map": {
+          "url": "/maps/packs/philippines.pmtiles",
+          "bytes": 760747052,
+          "label": "Map",
+          "fileName": "ph - Philippines.map.pmtiles"
+        },
+        "navigation": {
+          "url": "/maps/packs/philippines.nav.json",
+          "bytes": 1200,
+          "label": "Navigation Data",
+          "fileName": "ph - Philippines.nav.json",
+          "note": "Routing assistance. Create routes online; saved TBT works offline."
+        },
+        "topo": {
+          "url": "/maps/packs/philippines.topo.json",
+          "bytes": 900,
+          "label": "Topographic Data",
+          "fileName": "ph - Philippines.topo.json",
+          "note": "Topo pack. Elev primarily from saved routes; optional DEM when hosted."
+        }
+      }
+    },
+    {
+      "id": "vn",
+      "name": "Vietnam",
+      "bbox": { "minLat": 8.0, "maxLat": 23.5, "minLng": 102.0, "maxLng": 110.0 },
+      "layers": {
+        "map": {
+          "url": "/maps/packs/vietnam.pmtiles",
+          "bytes": 480000000,
+          "label": "Map",
+          "fileName": "vn - Vietnam.map.pmtiles"
+        },
+        "navigation": {
+          "url": "/maps/packs/vietnam.nav.json",
+          "bytes": 1200,
+          "label": "Navigation Data",
+          "fileName": "vn - Vietnam.nav.json",
+          "note": "Routing assistance when hosted. Create routes online; saved TBT offline."
+        },
+        "topo": {
+          "url": "/maps/packs/vietnam.topo.json",
+          "bytes": 900,
+          "label": "Topographic Data",
+          "fileName": "vn - Vietnam.topo.json"
+        }
+      }
+    },
+    {
+      "id": "sg",
+      "name": "Singapore",
+      "bbox": { "minLat": 1.15, "maxLat": 1.48, "minLng": 103.6, "maxLng": 104.1 },
+      "layers": {
+        "map": {
+          "url": "/maps/packs/singapore.pmtiles",
+          "bytes": 45000000,
+          "label": "Map",
+          "fileName": "sg - Singapore.map.pmtiles"
+        },
+        "navigation": {
+          "url": "/maps/packs/singapore.nav.json",
+          "bytes": 800,
+          "label": "Navigation Data",
+          "fileName": "sg - Singapore.nav.json",
+          "note": "Routing assistance pack when hosted."
+        },
+        "topo": {
+          "url": "/maps/packs/singapore.topo.json",
+          "bytes": 700,
+          "label": "Topographic Data",
+          "fileName": "sg - Singapore.topo.json"
+        }
+      }
+    },
+    {
+      "id": "my",
+      "name": "Malaysia",
+      "bbox": { "minLat": 0.8, "maxLat": 7.5, "minLng": 99.5, "maxLng": 119.5 },
+      "layers": {
+        "map": {
+          "url": "/maps/packs/malaysia.pmtiles",
+          "bytes": 520000000,
+          "label": "Map",
+          "fileName": "my - Malaysia.map.pmtiles"
+        },
+        "navigation": {
+          "url": "/maps/packs/malaysia.nav.json",
+          "bytes": 1200,
+          "label": "Navigation Data",
+          "fileName": "my - Malaysia.nav.json",
+          "note": "Routing assistance pack when hosted."
+        },
+        "topo": {
+          "url": "/maps/packs/malaysia.topo.json",
+          "bytes": 900,
+          "label": "Topographic Data",
+          "fileName": "my - Malaysia.topo.json"
+        }
+      }
+    },
+    {
+      "id": "id",
+      "name": "Indonesia",
+      "bbox": { "minLat": -11.5, "maxLat": 6.5, "minLng": 94.5, "maxLng": 141.5 },
+      "layers": {
+        "map": {
+          "url": "/maps/packs/indonesia.pmtiles",
+          "bytes": 900000000,
+          "label": "Map",
+          "fileName": "id - Indonesia.map.pmtiles"
+        },
+        "navigation": {
+          "url": "/maps/packs/indonesia.nav.json",
+          "bytes": 1400,
+          "label": "Navigation Data",
+          "fileName": "id - Indonesia.nav.json",
+          "note": "Routing assistance pack when hosted."
+        },
+        "topo": {
+          "url": "/maps/packs/indonesia.topo.json",
+          "bytes": 1000,
+          "label": "Topographic Data",
+          "fileName": "id - Indonesia.topo.json"
+        }
+      }
+    },
+    {
+      "id": "tw",
+      "name": "Taiwan",
+      "bbox": { "minLat": 21.7, "maxLat": 25.5, "minLng": 119.3, "maxLng": 122.2 },
+      "layers": {
+        "map": {
+          "url": "/maps/packs/taiwan.pmtiles",
+          "bytes": 180000000,
+          "label": "Map",
+          "fileName": "tw - Taiwan.map.pmtiles"
+        },
+        "navigation": {
+          "url": "/maps/packs/taiwan.nav.json",
+          "bytes": 1000,
+          "label": "Navigation Data",
+          "fileName": "tw - Taiwan.nav.json",
+          "note": "Routing assistance pack when hosted."
+        },
+        "topo": {
+          "url": "/maps/packs/taiwan.topo.json",
+          "bytes": 800,
+          "label": "Topographic Data",
+          "fileName": "tw - Taiwan.topo.json"
+        }
+      }
+    },
+    {
+      "id": "bn",
+      "name": "Brunei",
+      "bbox": { "minLat": 4.0, "maxLat": 5.1, "minLng": 114.0, "maxLng": 115.5 },
+      "layers": {
+        "map": {
+          "url": "/maps/packs/brunei.pmtiles",
+          "bytes": 25000000,
+          "label": "Map",
+          "fileName": "bn - Brunei.map.pmtiles"
+        },
+        "navigation": {
+          "url": "/maps/packs/brunei.nav.json",
+          "bytes": 700,
+          "label": "Navigation Data",
+          "fileName": "bn - Brunei.nav.json",
+          "note": "Routing assistance pack when hosted."
+        },
+        "topo": {
+          "url": "/maps/packs/brunei.topo.json",
+          "bytes": 600,
+          "label": "Topographic Data",
+          "fileName": "bn - Brunei.topo.json"
+        }
+      }
+    }
+  ]
+}

@@ -107,8 +107,18 @@ export const RideSummaryModal: React.FC<RideSummaryModalProps> = ({
   });
 
   const handleUploadToStravaApi = async () => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setExportNotice('Strava needs an internet connection.');
+      setTimeout(() => setExportNotice(null), 3500);
+      return;
+    }
     if (!stravaConnected) {
-      startStravaConnect();
+      try {
+        startStravaConnect();
+      } catch (err) {
+        setExportNotice(err instanceof Error ? err.message : 'Strava needs internet');
+        setTimeout(() => setExportNotice(null), 3500);
+      }
       return;
     }
     setStravaUploading(true);

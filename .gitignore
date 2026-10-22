@@ -6,3 +6,18 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Country map binaries — host on CDN / download to device; never ship in the app bundle
+public/maps/*.pmtiles
+public/maps/packs/*.pmtiles
+public/maps/packs/*.vm
+public/maps/packs/*.rt
+public/maps/packs/*.elv
+public/maps/packs/*.cache
+public/maps/packs/*.db
+public/maps/packs/*_timestamp
+public/maps/packs/*.timestamp
+
+# go-pmtiles CLI downloaded by npm run maps:ph
+tools/go-pmtiles/
+

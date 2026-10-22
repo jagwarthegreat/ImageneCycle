@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "maps:ph": "node scripts/fetch-philippines-map.mjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -21,6 +22,8 @@
     "leaflet": "^1.9.4",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "pmtiles": "^4.5.0",
+    "protomaps-leaflet": "^5.1.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "vite": "^8.3.0"

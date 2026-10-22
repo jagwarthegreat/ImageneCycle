@@ -34,6 +34,18 @@ export interface ClimbSegment {
   profileSlices: ProfileSlice[];
 }
 
+/** OSRM turn-by-turn step along a planned route */
+export interface RouteTurn {
+  index: number;
+  instruction: string;
+  distanceMeters: number;
+  name: string;
+  maneuverType: string;
+  modifier?: string;
+  location: { lat: number; lng: number };
+  distFromRouteStart: number;
+}
+
 export interface RouteData {
   id: string;
   name: string;
@@ -42,6 +54,11 @@ export interface RouteData {
   totalElevationGain: number; // meters
   points: RoutePoint[];
   climbs: ClimbSegment[];
+  turns?: RouteTurn[];
+  startLat?: number;
+  startLng?: number;
+  endLat?: number;
+  endLng?: number;
 }
 
 export interface ClimbProLiveState {
@@ -123,7 +140,7 @@ export interface BleDeviceStatus {
 export interface GpsStatus {
   hasFix: boolean;
   accuracy: number; // meters
-  quality: 'GPS 3D' | 'GPS 2D' | 'Searching...' | 'Standby' | 'Error';
+  quality: 'GPS 3D' | 'GPS 2D' | 'Weak' | 'Searching...' | 'Standby' | 'Error';
   errorMessage?: string;
 }
 

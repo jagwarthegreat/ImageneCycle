@@ -108,6 +108,9 @@ export async function getValidStravaAccessToken(): Promise<string | null> {
 }
 
 export function startStravaConnect() {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new Error('Strava needs an internet connection.');
+  }
   if (typeof window !== 'undefined') {
     window.location.href = '/api/strava/auth';
   }

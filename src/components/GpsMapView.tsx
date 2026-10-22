@@ -1,9 +1,58 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { leafletLayer } from 'protomaps-leaflet';
 import { RoutePoint } from '../types/cycling';
 import { createCachedTileLayer } from '../utils/tileCache';
+import { resolveActiveBasemap } from '../utils/mapPacks';
 import { Crosshair, Map as MapIcon, Compass as CompassIcon, MapPin } from 'lucide-react';
+
+function attachWorldOverview(map: L.Map, isDarkMode: boolean): L.Layer {
+  // World overview — not a country offline pack (needs network). No country roads from app bundle.
+  const tileUrl = isDarkMode
+    ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+    : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  const layer = createCachedTileLayer(tileUrl, {
+    maxZoom: 19,
+    subdomains: isDarkMode ? 'abcd' : 'abc'
+  }).addTo(map);
+  layer.bringToBack?.();
+  return layer;
+}
+
+async function attachBasemap(
+  map: L.Map,
+  isDarkMode: boolean,
+  lat: number,
+  lng: number
+): Promise<{ layer: L.Layer; offline: boolean; packName?: string; error?: string }> {
+  const active = await resolveActiveBasemap(lat || 14.5995, lng || 120.9842);
+  if (active?.pmtiles) {
+    try {
+      // Pass PMTiles instance (FileSource) — blob:/http URLs do not paint offline archives
+      // Cast: app uses pmtiles@4 FileSource; protomaps-leaflet types pin pmtiles@3 — duck-typed at runtime
+      const layer = leafletLayer({
+        url: active.pmtiles as unknown as string,
+        flavor: isDarkMode ? 'dark' : 'light',
+        lang: 'en',
+        attribution: '© OpenStreetMap · Protomaps'
+      }) as unknown as L.GridLayer;
+      layer.addTo(map);
+      layer.bringToBack?.();
+      return { layer, offline: true, packName: active.packName };
+    } catch (err) {
+      console.warn('Offline PMTiles failed, falling back to world overview:', err);
+      const layer = attachWorldOverview(map, isDarkMode);
+      return {
+        layer,
+        offline: false,
+        error: 'Offline map invalid — using world overview'
+      };
+    }
+  }
+
+  return { layer: attachWorldOverview(map, isDarkMode), offline: false };
+}
 
 interface GpsMapViewProps {
   currentPoint: RoutePoint;
@@ -14,6 +63,10 @@ interface GpsMapViewProps {
   routeName?: string;
   onLocateMe?: () => void;
   batterySaver?: boolean;
+  /** Increment to fit map bounds to the loaded course polyline */
+  fitRouteToken?: number;
+  /** Increment after map pack download/delete to reload basemap */
+  basemapToken?: number;
 }
 
 export const GpsMapView: React.FC<GpsMapViewProps> = ({
@@ -24,7 +77,9 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   liveBreadcrumbs = [],
   routeName,
   onLocateMe,
-  batterySaver = false
+  batterySaver = false,
+  fitRouteToken = 0,
+  basemapToken = 0
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -34,7 +89,10 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const breadcrumbPolylineRef = useRef<L.Polyline | null>(null);
   const chevronsRef = useRef<L.LayerGroup | null>(null);
   const endpointsRef = useRef<L.LayerGroup | null>(null);
-  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const tileLayerRef = useRef<L.Layer | null>(null);
+  const [offlineMapReady, setOfflineMapReady] = useState<boolean | null>(null);
+  const [activePackName, setActivePackName] = useState<string | null>(null);
+  const [basemapError, setBasemapError] = useState<string | null>(null);
   const hasCenteredInitiallyRef = useRef<boolean>(false);
   const pendingBreadcrumbsRef = useRef<{ lat: number; lng: number }[] | null>(null);
   const breadcrumbRafRef = useRef<number | null>(null);
@@ -70,18 +128,6 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       map.on('dragstart', () => {
         setAutoCenter(false);
       });
-
-      // Primary Tile Layer with CacheStorage Caching for offline & intermittent rides
-      const tileUrl = isDarkMode
-        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-        : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-
-      const tileLayer = createCachedTileLayer(tileUrl, {
-        maxZoom: 19,
-        subdomains: isDarkMode ? 'abcd' : 'abc'
-      }).addTo(map);
-
-      tileLayerRef.current = tileLayer;
 
       // Layer groups for markers & chevrons
       endpointsRef.current = L.layerGroup().addTo(map);
@@ -181,6 +227,31 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     };
   }, []);
 
+  // Swap day/night / pack basemap (PMTiles flavor or raster URL)
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+    let cancelled = false;
+    const lat = currentPoint.lat || 14.5995;
+    const lng = currentPoint.lng || 120.9842;
+    void attachBasemap(map, isDarkMode, lat, lng).then(({ layer, offline, packName, error }) => {
+      if (cancelled || mapInstanceRef.current !== map) {
+        map.removeLayer(layer);
+        return;
+      }
+      if (tileLayerRef.current) {
+        map.removeLayer(tileLayerRef.current);
+      }
+      tileLayerRef.current = layer;
+      setOfflineMapReady(offline);
+      setActivePackName(packName || null);
+      setBasemapError(error || null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isDarkMode, basemapToken, currentPoint.lat, currentPoint.lng]);
+
   // Helper to render start/finish markers and navigation chevrons
   const updateEndpointsAndChevrons = (map: L.Map, latLngs: [number, number][]) => {
     if (!endpointsRef.current || !chevronsRef.current) return;
@@ -256,6 +327,27 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       }
     }
   }, [routePoints, isDarkMode]);
+
+  // Fit course when parent requests (route selected as current ride)
+  useEffect(() => {
+    if (!fitRouteToken || !mapInstanceRef.current || !polylineCoreRef.current) return;
+    if (!routePoints || routePoints.length < 2) return;
+    const map = mapInstanceRef.current;
+    const line = polylineCoreRef.current;
+    const timer = window.setTimeout(() => {
+      try {
+        setAutoCenter(false);
+        if (!line.getLatLngs() || (line.getLatLngs() as unknown[]).length < 2) return;
+        map.fitBounds(line.getBounds(), {
+          padding: [25, 25],
+          maxZoom: 16,
+          animate: !batterySaver
+        });
+        map.invalidateSize();
+      } catch {}
+    }, 80);
+    return () => clearTimeout(timer);
+  }, [fitRouteToken, routePoints, batterySaver]);
 
   // Throttled live breadcrumb trail (rAF coalesce — keeps UI fluid as array grows)
   useEffect(() => {
@@ -372,6 +464,22 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
           {routeName || (currentPoint.lat ? `${currentPoint.lat.toFixed(4)}°, ${currentPoint.lng.toFixed(4)}°` : 'Current Location')}
         </span>
       </div>
+
+      {basemapError && (
+        <div className="absolute top-10 left-3 right-14 z-[400] bg-rose-50/95 border border-rose-300 text-rose-900 text-[10px] font-sports font-semibold px-2 py-1 rounded-lg shadow-sm">
+          {basemapError}
+        </div>
+      )}
+      {!basemapError && offlineMapReady === false && (
+        <div className="absolute top-10 left-3 right-14 z-[400] bg-amber-50/95 border border-amber-300 text-amber-900 text-[10px] font-sports font-semibold px-2 py-1 rounded-lg shadow-sm">
+          World overview — open Download Maps to save a country offline (OpenStreetMap)
+        </div>
+      )}
+      {!basemapError && offlineMapReady === true && (
+        <div className="absolute top-10 left-3 z-[400] bg-emerald-50/90 border border-emerald-300 text-emerald-800 text-[9px] font-sports font-bold px-1.5 py-0.5 rounded shadow-sm uppercase tracking-wider">
+          {activePackName || 'Offline'} map
+        </div>
+      )}
 
       {/* Scale Indicator */}
       <div className="absolute bottom-2 left-3 pointer-events-none flex flex-col items-start z-[400]">

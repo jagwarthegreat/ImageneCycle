@@ -1,27 +1,45 @@
 import React, { useMemo } from 'react';
-import { ClimbSegment } from '../types/cycling';
-import { getGradeColor } from '../utils/climbProEngine';
+import { ClimbSegment, RoutePoint } from '../types/cycling';
+import { generateProfileSlices, getGradeColor } from '../utils/climbProEngine';
 
 interface ClimbProElevationChartProps {
   climb: ClimbSegment | null;
+  /** Full course points — used as elevation preview when no climb is active */
+  routePoints?: RoutePoint[];
   currentDist: number; // current distance along whole route in meters
   currentGrade: number; // current instant grade %
   avgGradeRemaining: number; // calculated remaining average grade %
   isDarkMode?: boolean;
 }
 
+const WIDTH = 360;
+const HEIGHT = 96;
+const PAD_X = 4; // SVG-internal; outer px-* provides device margins
+const CHART_TOP = 20;
+const CHART_BOTTOM = HEIGHT - 6;
+const CHART_HEIGHT = CHART_BOTTOM - CHART_TOP;
+const PLOT_WIDTH = WIDTH - PAD_X * 2;
+
+function distToX(distRatio: number): number {
+  return PAD_X + Math.max(0, Math.min(1, distRatio)) * PLOT_WIDTH;
+}
+
 export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
   climb,
+  routePoints = [],
   currentDist,
   currentGrade,
   avgGradeRemaining,
   isDarkMode = false
 }) => {
-  // If no climb active, render placeholder or gentle preview
-  if (!climb || climb.points.length < 2) {
+  const useRouteProfile = (!climb || climb.points.length < 2) && routePoints.length > 1;
+  const profilePoints = useRouteProfile ? routePoints : climb?.points || [];
+  const isRouteMode = useRouteProfile;
+
+  if (profilePoints.length < 2) {
     return (
-      <div className={`w-full h-full flex flex-col justify-between p-2 select-none ${isDarkMode ? 'bg-zinc-900 text-zinc-400' : 'bg-white text-zinc-500'}`}>
-        <div className="flex items-center justify-between text-xs font-sports uppercase tracking-wider font-semibold">
+      <div className={`w-full flex flex-col justify-between px-3 py-2 select-none ${isDarkMode ? 'bg-zinc-950 text-zinc-400' : 'bg-white text-zinc-500'}`}>
+        <div className="flex items-center justify-between text-[10px] font-sports uppercase tracking-wider font-semibold">
           <span>Climb Profile</span>
           <span>No Active Climb</span>
         </div>
@@ -36,183 +54,149 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
     );
   }
 
-  // Calculate relative rider position within the climb: 0 to 1
-  const climbStart = climb.startDist;
-  const climbEnd = climb.endDist;
+  const climbStart = isRouteMode ? profilePoints[0].distFromStart : (climb as ClimbSegment).startDist;
+  const climbEnd = isRouteMode
+    ? profilePoints[profilePoints.length - 1].distFromStart
+    : (climb as ClimbSegment).endDist;
   const climbLength = Math.max(1, climbEnd - climbStart);
   const relativeDist = Math.max(0, Math.min(climbLength, currentDist - climbStart));
-  const progressRatio = relativeDist / climbLength; // 0.0 to 1.0
+  const progressRatio = relativeDist / climbLength;
 
-  // Min and Max elevation for scaling
-  const minEle = Math.min(...climb.points.map(p => p.ele));
-  const maxEle = Math.max(...climb.points.map(p => p.ele));
+  const minEle = Math.min(...profilePoints.map(p => p.ele));
+  const maxEle = Math.max(...profilePoints.map(p => p.ele));
   const eleSpan = Math.max(10, maxEle - minEle);
 
-  // SVG dimensions for vector rendering
-  const width = 360;
-  const height = 90;
-  const chartBottom = height - 12;
-  const chartTop = 18;
-  const chartHeight = chartBottom - chartTop;
+  const slices = useMemo(() => {
+    if (climb?.profileSlices?.length && !isRouteMode) return climb.profileSlices;
+    return generateProfileSlices(profilePoints);
+  }, [climb, isRouteMode, profilePoints]);
 
-  // Build segmented polygon blocks for color gradient steps
   const segments = useMemo(() => {
-    const pts = climb.points;
-    if (pts.length < 2) return [];
-
-    const blocks: {
-      x1: number;
-      x2: number;
-      y1: number;
-      y2: number;
-      color: string;
-      grade: number;
-    }[] = [];
-
-    // Group into small steps for smooth gradient transitions
-    const stepSize = Math.max(1, Math.floor(pts.length / 28));
-
-    for (let i = 0; i < pts.length - 1; i += stepSize) {
-      const p1 = pts[i];
-      const p2 = pts[Math.min(pts.length - 1, i + stepSize)];
-
-      const x1 = ((p1.distFromStart - climbStart) / climbLength) * width;
-      const x2 = ((p2.distFromStart - climbStart) / climbLength) * width;
-
-      const y1 = chartBottom - ((p1.ele - minEle) / eleSpan) * chartHeight;
-      const y2 = chartBottom - ((p2.ele - minEle) / eleSpan) * chartHeight;
-
-      const dDist = Math.max(1, p2.distFromStart - p1.distFromStart);
-      const grade = ((p2.ele - p1.ele) / dDist) * 100;
-      const color = getGradeColor(grade);
-
-      blocks.push({
-        x1: Math.max(0, x1),
-        x2: Math.min(width, x2),
-        y1,
-        y2,
-        color,
-        grade
+    if (slices.length > 0) {
+      return slices.map(sl => {
+        const x1 = distToX((sl.distStart - climbStart) / climbLength);
+        const x2 = distToX((sl.distEnd - climbStart) / climbLength);
+        const y1 = CHART_BOTTOM - ((sl.eleStart - minEle) / eleSpan) * CHART_HEIGHT;
+        const y2 = CHART_BOTTOM - ((sl.eleEnd - minEle) / eleSpan) * CHART_HEIGHT;
+        return {
+          x1,
+          x2: Math.max(x1 + 0.5, x2),
+          y1,
+          y2,
+          color: sl.color || getGradeColor(sl.grade),
+          grade: sl.grade
+        };
       });
     }
 
-    return blocks;
-  }, [climb, climbStart, climbLength, minEle, eleSpan, width, height, chartBottom, chartHeight]);
-
-  // Calculate current rider position X and Y on the profile
-  const riderX = progressRatio * width;
-  // Interpolate rider Y elevation on chart
-  let riderY = chartBottom;
-  for (let i = 0; i < segments.length; i++) {
-    const s = segments[i];
-    if (riderX >= s.x1 && riderX <= s.x2) {
-      const t = (riderX - s.x1) / Math.max(0.1, s.x2 - s.x1);
-      riderY = s.y1 + (s.y2 - s.y1) * t;
-      break;
+    // Fallback: dense trapezoids from points
+    const pts = profilePoints;
+    const blocks: { x1: number; x2: number; y1: number; y2: number; color: string; grade: number }[] = [];
+    const stepSize = Math.max(1, Math.floor(pts.length / 40));
+    for (let i = 0; i < pts.length - 1; i += stepSize) {
+      const p1 = pts[i];
+      const p2 = pts[Math.min(pts.length - 1, i + stepSize)];
+      const x1 = distToX((p1.distFromStart - climbStart) / climbLength);
+      const x2 = distToX((p2.distFromStart - climbStart) / climbLength);
+      const y1 = CHART_BOTTOM - ((p1.ele - minEle) / eleSpan) * CHART_HEIGHT;
+      const y2 = CHART_BOTTOM - ((p2.ele - minEle) / eleSpan) * CHART_HEIGHT;
+      const dDist = Math.max(1, p2.distFromStart - p1.distFromStart);
+      const grade = ((p2.ele - p1.ele) / dDist) * 100;
+      blocks.push({ x1, x2, y1, y2, color: getGradeColor(grade), grade });
     }
-  }
+    return blocks;
+  }, [slices, profilePoints, climbStart, climbLength, minEle, eleSpan]);
 
-  // Constrain pin pill tooltip so it doesn't clip on edges
-  const pillX = Math.min(Math.max(riderX, 28), width - 28);
+  const riderX = distToX(progressRatio);
+  const gridYs = [0, 0.25, 0.5, 0.75, 1].map(t => CHART_TOP + t * CHART_HEIGHT);
+  // Single X for pill, line, play — plot-aligned so they stay stacked
+  const scrubberLeftPct = Math.max(
+    6,
+    Math.min(94, ((PAD_X + progressRatio * PLOT_WIDTH) / WIDTH) * 100)
+  );
 
   return (
-    <div className={`w-full select-none flex flex-col justify-between ${isDarkMode ? 'bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`}>
-      {/* SVG Climb Profile Visualization */}
-      <div className="relative w-full h-[92px] overflow-hidden">
-        <svg
-          viewBox={`0 0 ${width} ${height}`}
-          preserveAspectRatio="none"
-          className="w-full h-full"
-        >
-          {/* Subtle horizontal grid lines */}
-          <line x1="0" y1={chartTop} x2={width} y2={chartTop} stroke={isDarkMode ? '#3f3f46' : '#e2e8f0'} strokeWidth="1" strokeDasharray="3 3" />
-          <line x1="0" y1={(chartTop + chartBottom) / 2} x2={width} y2={(chartTop + chartBottom) / 2} stroke={isDarkMode ? '#3f3f46' : '#e2e8f0'} strokeWidth="1" strokeDasharray="3 3" />
-          <line x1="0" y1={chartBottom} x2={width} y2={chartBottom} stroke={isDarkMode ? '#52525b' : '#cbd5e1'} strokeWidth="1.5" />
+    <div className={`w-full select-none flex flex-col ${isDarkMode ? 'bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`}>
+      {isRouteMode && (
+        <div className="flex items-center justify-between px-3 pt-1 text-[10px] font-sports uppercase tracking-wider font-semibold text-zinc-400">
+          <span>Route Profile</span>
+          <span>{(climbLength / 1000).toFixed(1)} km course</span>
+        </div>
+      )}
 
-          {/* Color-segmented bars under the elevation profile */}
-          {segments.map((seg, idx) => {
-            const polygonPoints = `${seg.x1},${chartBottom} ${seg.x1},${seg.y1} ${seg.x2},${seg.y2} ${seg.x2},${chartBottom}`;
-            return (
-              <polygon
-                key={idx}
-                points={polygonPoints}
-                fill={seg.color}
-                stroke={seg.color}
-                strokeWidth="0.5"
-                className="transition-colors duration-200"
-              />
-            );
-          })}
+      <div className="px-3 pt-1">
+        {/* Chart + progress share one relative box so scrubber spans both */}
+        <div className="relative w-full">
+          <div className="w-full h-[96px]">
+            <svg
+              viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+              preserveAspectRatio="none"
+              className="w-full h-full block"
+            >
+              {gridYs.map((y, i) => (
+                <line
+                  key={i}
+                  x1={PAD_X}
+                  y1={y}
+                  x2={WIDTH - PAD_X}
+                  y2={y}
+                  stroke={isDarkMode ? '#3f3f46' : '#d4d4d8'}
+                  strokeWidth="1"
+                  strokeDasharray="4 3"
+                />
+              ))}
 
-          {/* Past elevation shading (dimmed or overlay) */}
-          {riderX > 0 && (
-            <rect
-              x="0"
-              y="0"
-              width={riderX}
-              height={chartBottom}
-              fill={isDarkMode ? 'rgba(0,0,0,0.35)' : 'rgba(255,255,255,0.45)'}
-            />
-          )}
+              {segments.map((seg, idx) => (
+                <polygon
+                  key={idx}
+                  points={`${seg.x1},${CHART_BOTTOM} ${seg.x1},${seg.y1} ${seg.x2},${seg.y2} ${seg.x2},${CHART_BOTTOM}`}
+                  fill={seg.color}
+                  stroke={seg.color}
+                  strokeWidth="0.4"
+                />
+              ))}
 
-          {/* Vertical Rider Pin Line */}
-          <line
-            x1={riderX}
-            y1={chartTop - 4}
-            x2={riderX}
-            y2={chartBottom}
-            stroke="#2563eb"
-            strokeWidth="2"
-          />
-
-          {/* Rider Position Circle on the profile line */}
-          <circle
-            cx={riderX}
-            cy={riderY}
-            r="3.5"
-            fill="#ffffff"
-            stroke="#2563eb"
-            strokeWidth="2"
-          />
-        </svg>
-
-        {/* Current Grade Badge / Tooltip floating directly above rider pin - exactly as in Magene C706 screenshot */}
-        <div
-          className="absolute pointer-events-none transform -translate-x-1/2 flex flex-col items-center"
-          style={{
-            left: `${(riderX / width) * 100}%`,
-            top: '2px'
-          }}
-        >
-          <div className="bg-blue-500 text-white font-digital font-bold text-[12px] px-2 py-0.5 rounded shadow-sm flex items-center justify-center leading-none">
-            {currentGrade >= 0 ? `${currentGrade.toFixed(1)}%` : `${currentGrade.toFixed(1)}%`}
+              {progressRatio > 0 && (
+                <rect
+                  x={PAD_X}
+                  y={CHART_TOP}
+                  width={Math.max(0, riderX - PAD_X)}
+                  height={CHART_HEIGHT}
+                  fill={isDarkMode ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.5)'}
+                />
+              )}
+            </svg>
           </div>
-          <div className="w-0 h-0 border-x-4 border-x-transparent border-t-4 border-t-blue-500"></div>
+
+          <div className="relative w-full h-3.5 bg-blue-100">
+            <div
+              className="absolute inset-y-0 left-0 bg-blue-500 transition-all duration-150"
+              style={{ width: `${scrubberLeftPct}%` }}
+            />
+          </div>
+
+          {/* Intact scrubber: pill → line → play */}
+          <div
+            className="absolute top-0 bottom-0 z-10 pointer-events-none -translate-x-1/2 flex flex-col items-center"
+            style={{ left: `${scrubberLeftPct}%` }}
+          >
+            <div className="bg-blue-500 text-white font-digital font-bold text-[13px] px-2.5 py-0.5 rounded shadow-md leading-none whitespace-nowrap shrink-0 mt-0.5">
+              {currentGrade.toFixed(1)}%
+            </div>
+            <div className="w-0 h-0 border-x-[5px] border-x-transparent border-t-[5px] border-t-blue-500 shrink-0" />
+            <div className="w-0.5 flex-1 min-h-0 bg-blue-500" />
+            <div className="w-4 h-4 rounded-sm bg-blue-600 flex items-center justify-center shadow-sm shrink-0 -mt-px mb-0">
+              <span className="text-white text-[9px] font-bold leading-none translate-x-px">▶</span>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* Climb Progress Bar with ▶ marker along the baseline (exact Magene layout) */}
-      <div className="relative w-full h-3 bg-blue-100 flex items-center border-t border-b border-blue-200">
-        {/* Filled blue completed progress bar */}
-        <div
-          className="h-full bg-blue-500 transition-all duration-150"
-          style={{ width: `${progressRatio * 100}%` }}
-        />
-        {/* Little Rider / Chevron Marker */}
-        <div
-          className="absolute transform -translate-x-1/2 text-blue-600 text-[10px] leading-none"
-          style={{ left: `${progressRatio * 100}%` }}
-        >
-          <span className="font-bold">▶</span>
-        </div>
-      </div>
-
-      {/* Bottom Bar: AVG GRADE REMAIN. (Magene C706 Screenshot clone) */}
-      <div className={`flex items-center justify-between px-3 py-1 font-sports border-b ${isDarkMode ? 'border-zinc-800 bg-zinc-950 text-zinc-300' : 'border-zinc-200 bg-white text-zinc-500'}`}>
+      <div className={`flex items-center justify-between px-3 py-1.5 font-sports border-b ${isDarkMode ? 'border-zinc-800 bg-zinc-950 text-zinc-300' : 'border-zinc-200 bg-white text-zinc-500'}`}>
         <span className="text-[11px] font-bold tracking-wider uppercase text-zinc-400">
           AVG GRADE REMAIN.
         </span>
-        <span className={`text-[15px] font-digital font-bold ${isDarkMode ? 'text-white' : 'text-zinc-950'}`}>
+        <span className={`text-[16px] font-digital font-bold ${isDarkMode ? 'text-white' : 'text-zinc-950'}`}>
           {avgGradeRemaining > 0 ? `${avgGradeRemaining.toFixed(1)}%` : '0.0%'}
         </span>
       </div>

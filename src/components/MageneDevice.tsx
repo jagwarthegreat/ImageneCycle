@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { GpsMapView } from './GpsMapView';
 import { ClimbProElevationChart } from './ClimbProElevationChart';
 import { WeatherBadge } from './WeatherBadge';
@@ -13,24 +13,34 @@ import {
   Volume2, 
   VolumeX, 
   Bluetooth, 
-  Battery, 
   TrendingUp, 
   ChevronLeft, 
   ChevronRight,
   Menu,
   Flag,
   RotateCcw,
-  Square
+  Square,
+  CornerUpLeft,
+  CornerUpRight,
+  ArrowUp,
+  Navigation2
 } from 'lucide-react';
 
-import { RoutePoint, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert } from '../types/cycling';
+import { RoutePoint, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert, RouteTurn } from '../types/cycling';
 import { WeatherData } from '../services/weatherService';
+import {
+  getRouteRemainingDistanceMeters,
+  getRouteRemainingAscentMeters,
+  getRouteRemainingAvgGrade,
+  getNextTurn
+} from '../utils/routeEncode';
 
 interface MageneDeviceProps {
   metrics: RideMetrics;
   climbState: ClimbProLiveState;
   currentPoint: RoutePoint;
   routePoints?: RoutePoint[];
+  routeTurns?: RouteTurn[];
   bleStatus: BleDeviceStatus;
   gpsStatus: GpsStatus;
   onPageChange?: (page: number) => void;
@@ -50,6 +60,29 @@ interface MageneDeviceProps {
   weather?: WeatherData | null;
   weatherLoading?: boolean;
   batterySaver?: boolean;
+  fitRouteToken?: number;
+  /** When false, show OFFLINE chip (weather/Strava unavailable) */
+  isOnline?: boolean;
+  basemapToken?: number;
+}
+
+function formatClock12h(d: Date): string {
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const s = d.getSeconds();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12;
+  if (h === 0) h = 12;
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${h}:${pad(m)}:${pad(s)} ${ampm}`;
+}
+
+function NextTurnGlyph({ turn }: { turn: RouteTurn }) {
+  const mod = turn.modifier || '';
+  if (turn.maneuverType === 'arrive') return <Flag className="w-4 h-4 text-white shrink-0" />;
+  if (mod.includes('left')) return <CornerUpLeft className="w-4 h-4 text-white shrink-0" />;
+  if (mod.includes('right')) return <CornerUpRight className="w-4 h-4 text-white shrink-0" />;
+  return <ArrowUp className="w-4 h-4 text-white shrink-0" />;
 }
 
 export const MageneDevice: React.FC<MageneDeviceProps> = ({
@@ -57,6 +90,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   climbState,
   currentPoint,
   routePoints = [],
+  routeTurns = [],
   bleStatus,
   gpsStatus,
   onLap,
@@ -74,8 +108,16 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   latestLapAlert,
   weather = null,
   weatherLoading = false,
-  batterySaver = false
+  batterySaver = false,
+  fitRouteToken = 0,
+  isOnline = true,
+  basemapToken = 0
 }) => {
+  const [clockStr, setClockStr] = useState(() => formatClock12h(new Date()));
+  useEffect(() => {
+    const id = window.setInterval(() => setClockStr(formatClock12h(new Date())), 1000);
+    return () => clearInterval(id);
+  }, []);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
 
@@ -98,8 +140,32 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
     setCurrentPage(prev => (prev === 1 ? 5 : prev - 1));
   };
 
-  const distRemainKm = (climbState.distRemainingToTop / 1000).toFixed(2);
-  const remAscentM = Math.round(climbState.remAscent);
+  const hasActiveRoute = routePoints.length > 1;
+  // Route-level remain (not climb-only) so 0-climb courses still show directions
+  const routeDistRemainM = hasActiveRoute
+    ? getRouteRemainingDistanceMeters(routePoints, metrics.distanceTraveled)
+    : 0;
+  const routeRemAscentM = hasActiveRoute
+    ? getRouteRemainingAscentMeters(routePoints, metrics.distanceTraveled)
+    : 0;
+  const routeAvgGradeRem = hasActiveRoute
+    ? getRouteRemainingAvgGrade(routePoints, metrics.distanceTraveled)
+    : 0;
+
+  const distRemainKm = hasActiveRoute
+    ? (routeDistRemainM / 1000).toFixed(2)
+    : (climbState.distRemainingToTop / 1000).toFixed(2);
+  const remAscentM = hasActiveRoute ? routeRemAscentM : Math.round(climbState.remAscent);
+  const profileAvgGrade =
+    climbState.isInClimb || climbState.nextClimb
+      ? climbState.avgGradeRemaining
+      : hasActiveRoute
+      ? routeAvgGradeRem
+      : climbState.avgGradeRemaining;
+
+  const nextTurnCue = getNextTurn(routeTurns, metrics.distanceTraveled);
+  const formatTurnDist = (m: number) =>
+    m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${m} m`;
 
   return (
     <div className="w-full h-screen h-[100dvh] flex flex-col justify-between overflow-hidden bg-white select-none">
@@ -136,12 +202,14 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
           <span className={`flex items-center gap-1 font-bold ${
             gpsStatus.quality === 'GPS 3D' ? 'text-emerald-600' :
             gpsStatus.quality === 'GPS 2D' ? 'text-blue-600' :
+            gpsStatus.quality === 'Weak' ? 'text-amber-600' :
             gpsStatus.quality === 'Searching...' ? 'text-amber-500 animate-pulse' :
             'text-zinc-400'
           }`}>
             <Navigation className="w-3 h-3 fill-current" />
-            <span>{gpsStatus.quality}</span>
-            {gpsStatus.hasFix && gpsStatus.accuracy < 50 && (
+            <span>{gpsStatus.quality === 'Weak' ? 'Weak' : gpsStatus.quality}</span>
+            {(gpsStatus.quality === 'Weak' || (gpsStatus.hasFix && gpsStatus.accuracy < 50)) &&
+              gpsStatus.accuracy > 0 && (
               <span className="text-[10px] opacity-75 font-mono">({Math.round(gpsStatus.accuracy)}m)</span>
             )}
           </span>
@@ -158,12 +226,17 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
           </button>
         </div>
 
-        {/* Page Switcher, Weather & Battery */}
+        {/* Page Switcher, Weather & live clock */}
         <div className="flex items-center gap-2">
-          {/* Live GPS Weather Condition Indicator */}
+          {!isOnline && (
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-sports font-bold tracking-wider uppercase bg-amber-500/20 text-amber-600 border border-amber-500/40">
+              Offline
+            </span>
+          )}
+
           <WeatherBadge
-            weather={weather}
-            loading={weatherLoading}
+            weather={isOnline ? weather : null}
+            loading={isOnline && weatherLoading}
             isDarkMode={isDarkMode}
           />
 
@@ -175,7 +248,6 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             {isDarkMode ? <Sun className="w-3.5 h-3.5 text-amber-400" /> : <Moon className="w-3.5 h-3.5 text-zinc-500" />}
           </button>
 
-          {/* Screen Page Indicator */}
           <div className="flex items-center gap-1">
             <button onClick={handlePrevPage} className="p-0.5 hover:text-blue-500">
               <ChevronLeft className="w-3 h-3" />
@@ -186,10 +258,12 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             </button>
           </div>
 
-          <div className="flex items-center gap-1 pl-1">
-            <Battery className="w-3.5 h-3.5 text-emerald-500 fill-current" />
-            <span className="text-[10px]">94%</span>
-          </div>
+          <span
+            className="pl-1 font-digital font-bold text-[11px] tabular-nums text-zinc-700 dark:text-zinc-200 whitespace-nowrap"
+            title="Local time"
+          >
+            {clockStr}
+          </span>
         </div>
       </div>
 
@@ -236,42 +310,37 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             </div>
 
             {/* Second Row: DIST.REMAIN vs TOTAL DIST and REM. ASCENT vs TOTAL ASCENT */}
-            {(() => {
-              const hasActiveRoute = routePoints && routePoints.length > 1;
-              return (
-                <div className={`grid grid-cols-2 divide-x border-b py-1.5 px-3 shrink-0 ${
-                  isDarkMode ? 'divide-zinc-800 border-zinc-800 bg-zinc-950' : 'divide-zinc-200 border-zinc-200 bg-white'
-                }`}>
-                  <div className="flex flex-col items-center">
-                    <span className="text-[10px] sm:text-[11px] font-sports font-semibold tracking-wider text-zinc-400 uppercase">
-                      {hasActiveRoute ? 'DIST.REMAIN' : 'TOTAL DIST'}
-                    </span>
-                    <div className="flex items-baseline gap-1">
-                      <span className="font-digital text-[26px] sm:text-[30px] font-bold leading-none">
-                        {hasActiveRoute ? distRemainKm : (metrics.distanceTraveled / 1000).toFixed(2)}
-                      </span>
-                      <span className="font-sports font-bold text-[12px] text-zinc-500">
-                        km
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col items-center">
-                    <span className="text-[10px] sm:text-[11px] font-sports font-semibold tracking-wider text-zinc-400 uppercase">
-                      {hasActiveRoute ? 'REM. ASCENT' : 'TOTAL ASCENT'}
-                    </span>
-                    <div className="flex items-baseline gap-1">
-                      <span className="font-digital text-[26px] sm:text-[30px] font-bold leading-none">
-                        {hasActiveRoute ? remAscentM : Math.round(metrics.totalAscent)}
-                      </span>
-                      <span className="font-sports font-bold text-[12px] text-zinc-500">
-                        m
-                      </span>
-                    </div>
-                  </div>
+            <div className={`grid grid-cols-2 divide-x border-b py-1.5 px-3 shrink-0 ${
+              isDarkMode ? 'divide-zinc-800 border-zinc-800 bg-zinc-950' : 'divide-zinc-200 border-zinc-200 bg-white'
+            }`}>
+              <div className="flex flex-col items-center">
+                <span className="text-[10px] sm:text-[11px] font-sports font-semibold tracking-wider text-zinc-400 uppercase">
+                  {hasActiveRoute ? 'DIST.REMAIN' : 'TOTAL DIST'}
+                </span>
+                <div className="flex items-baseline gap-1">
+                  <span className="font-digital text-[26px] sm:text-[30px] font-bold leading-none">
+                    {hasActiveRoute ? distRemainKm : (metrics.distanceTraveled / 1000).toFixed(2)}
+                  </span>
+                  <span className="font-sports font-bold text-[12px] text-zinc-500">
+                    km
+                  </span>
                 </div>
-              );
-            })()}
+              </div>
+
+              <div className="flex flex-col items-center">
+                <span className="text-[10px] sm:text-[11px] font-sports font-semibold tracking-wider text-zinc-400 uppercase">
+                  {hasActiveRoute ? 'REM. ASCENT' : 'TOTAL ASCENT'}
+                </span>
+                <div className="flex items-baseline gap-1">
+                  <span className="font-digital text-[26px] sm:text-[30px] font-bold leading-none">
+                    {hasActiveRoute ? remAscentM : Math.round(metrics.totalAscent)}
+                  </span>
+                  <span className="font-sports font-bold text-[12px] text-zinc-500">
+                    m
+                  </span>
+                </div>
+              </div>
+            </div>
 
             {/* Middle Section: Full Leaflet GPS Map Navigation with Cached Tiles & Route Polyline */}
             <div className="relative flex-1 w-full min-h-[160px] border-b border-zinc-200 overflow-hidden">
@@ -284,16 +353,41 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 routeName={routeName}
                 onLocateMe={onLocateMe}
                 batterySaver={batterySaver}
+                fitRouteToken={fitRouteToken}
+                basemapToken={basemapToken}
               />
+              {/* Live next-turn cue (OSRM steps) */}
+              {nextTurnCue && (
+                <div className="absolute bottom-2 left-2 right-2 z-[450] pointer-events-none">
+                  <div className="bg-blue-600/95 text-white rounded-xl px-2.5 py-2 shadow-lg border border-white/30 flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
+                      <NextTurnGlyph turn={nextTurnCue.turn} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[9px] font-sports font-bold uppercase tracking-wider text-blue-100 flex items-center gap-1">
+                        <Navigation2 className="w-2.5 h-2.5" />
+                        Next turn
+                      </div>
+                      <div className="text-[11px] font-sports font-bold truncate leading-tight">
+                        {nextTurnCue.turn.instruction}
+                      </div>
+                    </div>
+                    <div className="font-digital font-bold text-sm shrink-0">
+                      {formatTurnDist(nextTurnCue.metersToManeuver)}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* ClimbPro Section: Elevation Profile, Progress & AVG GRADE REMAIN. */}
+            {/* ClimbPro / Route elevation profile */}
             <div className="w-full shrink-0">
               <ClimbProElevationChart
                 climb={climbState.currentClimb || climbState.nextClimb}
+                routePoints={routePoints}
                 currentDist={metrics.distanceTraveled}
                 currentGrade={metrics.currentGrade}
-                avgGradeRemaining={climbState.avgGradeRemaining}
+                avgGradeRemaining={profileAvgGrade}
                 isDarkMode={isDarkMode}
               />
             </div>
@@ -369,30 +463,60 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 <Mountain className="w-5 h-5 text-blue-600" />
                 <div>
                   <div className="text-[10px] font-sports font-bold tracking-wider text-zinc-400 uppercase">
-                    {climbState.isInClimb ? `CLIMB ${climbState.currentClimbIndex}/${climbState.totalClimbsCount}` : 'UPCOMING CLIMB'}
+                    {climbState.isInClimb
+                      ? (routePoints.length > 1
+                          ? `CLIMB ${climbState.currentClimbIndex}/${climbState.totalClimbsCount}`
+                          : `RECORDING CLIMB ${climbState.currentClimbIndex}`)
+                      : (routePoints.length > 1 ? 'UPCOMING CLIMB' : 'FREE RIDE CLIMB')}
                   </div>
                   <div className="font-sports font-bold text-base sm:text-lg leading-tight">
-                    {climbState.currentClimb?.name || climbState.nextClimb?.name || 'Climb Sector'}
+                    {climbState.currentClimb?.name || climbState.nextClimb?.name || (routePoints.length > 1 ? 'Climb Sector' : 'No climb yet')}
                   </div>
                 </div>
               </div>
               <span className="bg-blue-600 text-white font-digital font-bold px-2 py-0.5 rounded text-xs">
-                Cat {climbState.currentClimb?.category || climbState.nextClimb?.category || '4'}
+                Cat {climbState.currentClimb?.category || climbState.nextClimb?.category || '—'}
               </span>
             </div>
 
             <div className="grid grid-cols-2 gap-2 my-2">
               <div className={`border rounded-xl p-2 flex flex-col items-center ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
-                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">DIST. REMAIN</span>
-                <span className="font-digital text-xl sm:text-2xl font-bold">{distRemainKm} <span className="text-xs">km</span></span>
+                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">
+                  {hasActiveRoute
+                    ? (climbState.isInClimb ? 'CLIMB REMAIN' : 'DIST. REMAIN')
+                    : (climbState.isInClimb ? 'CLIMB DIST' : 'DIST. REMAIN')}
+                </span>
+                <span className="font-digital text-xl sm:text-2xl font-bold">
+                  {hasActiveRoute
+                    ? (climbState.isInClimb
+                        ? (climbState.distRemainingToTop / 1000).toFixed(2)
+                        : distRemainKm)
+                    : (climbState.isInClimb
+                        ? ((climbState.currentClimb?.totalLength || 0) / 1000).toFixed(2)
+                        : '0.00')}{' '}
+                  <span className="text-xs">km</span>
+                </span>
               </div>
               <div className={`border rounded-xl p-2 flex flex-col items-center ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
-                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">REM. ASCENT</span>
-                <span className="font-digital text-xl sm:text-2xl font-bold">{remAscentM} <span className="text-xs">m</span></span>
+                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">
+                  {hasActiveRoute
+                    ? (climbState.isInClimb ? 'REM. ASCENT' : 'REM. ASCENT')
+                    : (climbState.isInClimb ? 'CLIMB GAIN' : 'REM. ASCENT')}
+                </span>
+                <span className="font-digital text-xl sm:text-2xl font-bold">
+                  {hasActiveRoute
+                    ? (climbState.isInClimb ? Math.round(climbState.remAscent) : remAscentM)
+                    : (climbState.isInClimb
+                        ? Math.round(climbState.currentClimb?.totalElevationGain || 0)
+                        : 0)}{' '}
+                  <span className="text-xs">m</span>
+                </span>
               </div>
               <div className={`border rounded-xl p-2 flex flex-col items-center ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
-                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">AVG GRADE REM.</span>
-                <span className="font-digital text-xl sm:text-2xl font-bold text-blue-600">{climbState.avgGradeRemaining.toFixed(1)}%</span>
+                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">
+                  {climbState.isInClimb ? 'AVG GRADE REM.' : 'AVG GRADE REM.'}
+                </span>
+                <span className="font-digital text-xl sm:text-2xl font-bold text-blue-600">{profileAvgGrade.toFixed(1)}%</span>
               </div>
               <div className={`border rounded-xl p-2 flex flex-col items-center ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
                 <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">CURRENT GRADE</span>
@@ -403,9 +527,10 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             <div className="border border-zinc-200 rounded-xl overflow-hidden shadow-xs my-1">
               <ClimbProElevationChart
                 climb={climbState.currentClimb || climbState.nextClimb}
+                routePoints={routePoints}
                 currentDist={metrics.distanceTraveled}
                 currentGrade={metrics.currentGrade}
-                avgGradeRemaining={climbState.avgGradeRemaining}
+                avgGradeRemaining={profileAvgGrade}
                 isDarkMode={isDarkMode}
               />
             </div>
@@ -589,7 +714,29 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 routeName={routeName}
                 onLocateMe={onLocateMe}
                 batterySaver={batterySaver}
+                fitRouteToken={fitRouteToken}
+                basemapToken={basemapToken}
               />
+              {nextTurnCue && (
+                <div className="absolute bottom-3 left-2 right-2 z-[450] pointer-events-none">
+                  <div className="bg-blue-600/95 text-white rounded-xl px-2.5 py-2.5 shadow-lg border border-white/30 flex items-center gap-2">
+                    <div className="w-9 h-9 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
+                      <NextTurnGlyph turn={nextTurnCue.turn} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[9px] font-sports font-bold uppercase tracking-wider text-blue-100">
+                        Next turn
+                      </div>
+                      <div className="text-xs font-sports font-bold truncate">
+                        {nextTurnCue.turn.instruction}
+                      </div>
+                    </div>
+                    <div className="font-digital font-bold text-base shrink-0">
+                      {formatTurnDist(nextTurnCue.metersToManeuver)}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -690,8 +837,8 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
           <span>{isPlaying ? 'PAUSE' : (metrics.activeSessionId ? 'RESUME' : 'START RIDE')}</span>
         </button>
 
-        {/* STOP / FINISH ACTIVITY BUTTON */}
-        {onStopRide && (isPlaying || metrics.activeSessionId || metrics.timeElapsed > 0 || metrics.distanceTraveled > 0) && (
+        {/* STOP — only after user has a real session (Start Ride / unfinished resume) */}
+        {onStopRide && metrics.activeSessionId && (
           <button
             onClick={onStopRide}
             className="flex-1 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 active:bg-rose-700 text-white text-[11px] font-sports font-bold tracking-wider uppercase transition-colors shadow-xs flex items-center justify-center gap-1"
