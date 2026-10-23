@@ -111,9 +111,29 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
   const gridYs = [0, 0.25, 0.5, 0.75, 1].map(t => CHART_TOP + t * CHART_HEIGHT);
   // Single X for pill, line, play — plot-aligned so they stay stacked
   const scrubberLeftPct = Math.max(
-    6,
-    Math.min(94, ((PAD_X + progressRatio * PLOT_WIDTH) / WIDTH) * 100)
+    2,
+    Math.min(98, ((PAD_X + progressRatio * PLOT_WIDTH) / WIDTH) * 100)
   );
+
+  // Choice C: profile segment grade under rider; else GPS instant
+  const profileGradeAtRider = (() => {
+    if (segments.length === 0) return null;
+    const hit = segments.find(seg => riderX >= seg.x1 && riderX <= seg.x2);
+    if (hit) return hit.grade;
+    // Closest segment if between gaps
+    let best = segments[0];
+    let bestDist = Math.abs(riderX - (best.x1 + best.x2) / 2);
+    for (const seg of segments) {
+      const mid = (seg.x1 + seg.x2) / 2;
+      const d = Math.abs(riderX - mid);
+      if (d < bestDist) {
+        best = seg;
+        bestDist = d;
+      }
+    }
+    return best.grade;
+  })();
+  const pillGrade = profileGradeAtRider !== null ? profileGradeAtRider : currentGrade;
 
   return (
     <div className={`w-full select-none flex flex-col ${isDarkMode ? 'bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`}>
@@ -181,7 +201,7 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
             style={{ left: `${scrubberLeftPct}%` }}
           >
             <div className="bg-blue-500 text-white font-digital font-bold text-[13px] px-2.5 py-0.5 rounded shadow-md leading-none whitespace-nowrap shrink-0 mt-0.5">
-              {currentGrade.toFixed(1)}%
+              {pillGrade.toFixed(1)}%
             </div>
             <div className="w-0 h-0 border-x-[5px] border-x-transparent border-t-[5px] border-t-blue-500 shrink-0" />
             <div className="w-0.5 flex-1 min-h-0 bg-blue-500" />

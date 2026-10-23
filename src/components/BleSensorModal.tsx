@@ -79,8 +79,8 @@ export const BleSensorModal: React.FC<BleSensorModalProps> = ({
     }
   };
 
-  const handleDisconnectAll = () => {
-    bleManager.disconnectAll();
+  const handleDisconnectAll = async () => {
+    await bleManager.disconnectAll();
     setBleStatus({
       hrmConnected: false,
       cscConnected: false,
@@ -91,7 +91,7 @@ export const BleSensorModal: React.FC<BleSensorModalProps> = ({
     });
   };
 
-  const isWebBleSupported = bleManager.isSupported();
+  const isBleSupported = bleManager.isSupported();
 
   return (
     <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs animate-in fade-in duration-150">
@@ -107,7 +107,7 @@ export const BleSensorModal: React.FC<BleSensorModalProps> = ({
                 BLUETOOTH LOW ENERGY HARDWARE MANAGER
               </h2>
               <p className="text-xs text-zinc-400">
-                Direct Pairing with Real Cycling Sensors (0x180D, 0x1816, 0x1818)
+                Native Capacitor BLE pairing (0x180D, 0x1816, 0x1818)
               </p>
             </div>
           </div>
@@ -121,13 +121,13 @@ export const BleSensorModal: React.FC<BleSensorModalProps> = ({
 
         {/* Content */}
         <div className="p-5 overflow-y-auto space-y-4 text-sm text-zinc-200">
-          {!isWebBleSupported && (
+          {!isBleSupported && (
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 flex items-start gap-3">
               <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
               <div className="text-xs text-zinc-300">
-                <p className="font-semibold text-amber-300">Web Bluetooth Browser Requirement</p>
+                <p className="font-semibold text-amber-300">Bluetooth LE Unavailable</p>
                 <p className="mt-0.5">
-                  Direct Bluetooth Low Energy hardware communication requires Google Chrome, Edge, Brave, or Bluefy (on iOS). On standard mobile Safari, install as PWA or use the Flutter native build.
+                  This platform cannot access Bluetooth LE. Use the Android app build (Capacitor) or a desktop Chromium browser with BLE support.
                 </p>
               </div>
             </div>

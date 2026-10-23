@@ -204,7 +204,7 @@ class GpsService {
 
     this.autoPauseCheckInterval = window.setInterval(() => {
       if (this.lowSpeedStartTime && !this.isAutoPaused) {
-        if (Date.now() - this.lowSpeedStartTime >= 5000) {
+        if (Date.now() - this.lowSpeedStartTime >= 3000) {
           this.isAutoPaused = true;
           this.onAutoPauseChange?.(true);
         }
@@ -345,14 +345,15 @@ class GpsService {
       this.lastKnownHeading = heading;
     }
 
-    if (speedKmh < 0.5) {
+    // Auto-pause when speed stays below 3 km/h; resume when speed >= 3
+    if (speedKmh < 3.0) {
       if (!this.lowSpeedStartTime) {
         this.lowSpeedStartTime = Date.now();
-      } else if (Date.now() - this.lowSpeedStartTime >= 5000 && !this.isAutoPaused) {
+      } else if (Date.now() - this.lowSpeedStartTime >= 3000 && !this.isAutoPaused) {
         this.isAutoPaused = true;
         this.onAutoPauseChange?.(true);
       }
-    } else if (speedKmh >= 1.0 || deltaDist > 1.8) {
+    } else {
       this.lowSpeedStartTime = null;
       if (this.isAutoPaused) {
         this.isAutoPaused = false;
@@ -360,8 +361,8 @@ class GpsService {
       }
     }
 
-    // Check for sustained movement detection to wake or resume rides
-    if (speedKmh >= 2.0 || deltaDist >= 1.5) {
+    // Wake / resume existing sessions on movement
+    if (speedKmh >= 3.0 || deltaDist >= 1.5) {
       this.onMovementDetectedCb?.(speedKmh);
     }
 

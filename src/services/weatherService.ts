@@ -1,5 +1,5 @@
 /**
- * Live GPS Weather Service for Magene C706
+ * Live GPS Weather Service for ImageneCycle
  * Fetches real-time temperature, condition code, and precipitation probability
  * using live GPS coordinates with 10-minute caching.
  */

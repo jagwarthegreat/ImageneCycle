@@ -11,9 +11,15 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "maps:ph": "node scripts/fetch-philippines-map.mjs",
-    "maps:sh": "node scripts/fetch-philippines-map.mjs"
+    "maps:sh": "node scripts/fetch-philippines-map.mjs",
+    "icons:gen": "node scripts/generate-app-icons.mjs"
   },
   "dependencies": {
+    "@capacitor-community/bluetooth-le": "^8.3.0",
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "@capawesome-team/capacitor-android-foreground-service": "^8.1.0",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/leaflet": "^1.9.22",
@@ -38,6 +44,7 @@
     "@types/web-bluetooth": "^0.0.21",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "sharp": "^0.35.5",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"

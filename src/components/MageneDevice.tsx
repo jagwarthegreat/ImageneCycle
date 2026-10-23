@@ -330,7 +330,11 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             className="flex items-center gap-0.5 hover:text-blue-500 transition-colors ml-1"
             title="Bluetooth Sensors"
           >
-            <Bluetooth className={`w-3.5 h-3.5 ${bleStatus.hrmConnected || bleStatus.cscConnected || bleStatus.powerConnected ? 'text-blue-600' : 'text-zinc-400'}`} />
+            <Bluetooth className={`w-3.5 h-3.5 ${
+              bleStatus.hrmConnected || bleStatus.cscConnected || bleStatus.powerConnected
+                ? 'text-blue-500'
+                : 'text-zinc-400'
+            }`} />
             {bleStatus.hrmConnected && <Heart className="w-2.5 h-2.5 text-red-500 fill-current" />}
             {bleStatus.powerConnected && <Zap className="w-2.5 h-2.5 text-amber-500 fill-current" />}
           </button>
@@ -412,10 +416,10 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
         </div>
       )}
 
-      {/* 2. MAIN SCREEN CONTENT: 100% PURE MAGENE C706 DISPLAY */}
+      {/* 2. MAIN SCREEN CONTENT: ImageneCycle DISPLAY */}
       <div className={`flex-1 flex flex-col justify-between overflow-hidden ${isDarkMode ? 'bg-black text-white' : 'bg-white text-zinc-950'}`}>
         
-        {/* PAGE 1: EXACT MAGENE C706 SCREENSHOT REPLICA */}
+        {/* PAGE 1: ImageneCycle MAIN RIDE SCREEN */}
         {currentPage === 1 && (
           <div className="flex-1 flex flex-col justify-between overflow-hidden">
             {/* Top Row: Dual Ride Duration Timers (Riding Time Primary, Saddle Time Secondary) */}
@@ -524,7 +528,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             {metrics.isAutoPaused && (
               <div className="bg-amber-500 text-black font-sports font-bold text-xs py-1 px-3 flex items-center justify-center gap-1.5 animate-pulse z-[450] shadow-md border-b border-amber-600">
                 <span className="w-2 h-2 rounded-full bg-black" />
-                <span>AUTO-PAUSED (Speed &lt; 0.5 km/h) • Moving will auto-resume</span>
+                <span>AUTO-PAUSED (Speed &lt; 3 km/h) • Moving ≥ 3 km/h will auto-resume</span>
               </div>
             )}
 
@@ -844,6 +848,10 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 batterySaver={batterySaver}
                 fitRouteToken={fitRouteToken}
                 basemapToken={basemapToken}
+                autoCenter={autoCenter}
+                onToggleAutoCenter={onToggleAutoCenter}
+                invertHeading={invertHeading}
+                onToggleInvertHeading={onToggleInvertHeading}
               />
               {nextTurnCue && (
                 <NextTurnSquare cue={nextTurnCue} formatDist={formatTurnDist} />

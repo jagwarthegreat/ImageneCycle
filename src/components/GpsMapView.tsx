@@ -107,7 +107,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const batterySaverRef = useRef(batterySaver);
   batterySaverRef.current = batterySaver;
 
-  // Map Navigation Modes (Matching real-world Magene C706 behavior)
+  // Map Navigation Modes (course-up / north-up)
   const [internalAutoCenter, setInternalAutoCenter] = useState<boolean>(true);
   const autoCenter = propAutoCenter !== undefined ? propAutoCenter : internalAutoCenter;
   const onToggleAutoCenterRef = useRef(onToggleAutoCenter);
@@ -125,7 +125,8 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     }
   };
 
-  const [headingUpMode, setHeadingUpMode] = useState<boolean>(true); // Default: Heading-Up / Course-Up
+  const [headingUpMode, setHeadingUpMode] = useState<boolean>(false); // Default: NORTH UP
+  const [mapEpoch, setMapEpoch] = useState(0); // bump when Leaflet map is ready (for HDG drag bind)
   const [internalInvertHeading, setInternalInvertHeading] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -151,6 +152,11 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   };
 
   const effectiveHeading = ((heading || 0) + (invertHeading ? 180 : 0)) % 360;
+  const rotateWrapperRef = useRef<HTMLDivElement>(null);
+  const effectiveHeadingRef = useRef(effectiveHeading);
+  effectiveHeadingRef.current = effectiveHeading;
+  const setAutoCenterStateRef = useRef(setAutoCenterState);
+  setAutoCenterStateRef.current = setAutoCenterState;
 
   // Initialize Leaflet Map
   useEffect(() => {
@@ -178,6 +184,8 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         setAutoCenterState(false);
       });
 
+      L.control.scale({ imperial: false, metric: true, position: 'bottomleft' }).addTo(map);
+
       // Layer groups for markers & chevrons
       endpointsRef.current = L.layerGroup().addTo(map);
       chevronsRef.current = L.layerGroup().addTo(map);
@@ -196,7 +204,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       }).addTo(map);
       polylineBorderRef.current = polylineBorder;
 
-      // 2. Draw Route Polyline Core (Bright Yellow Core as in Magene C706)
+      // 2. Draw Route Polyline Core (bright yellow)
       const polylineCore = L.polyline(latLngs, {
         color: '#facc15',
         weight: 4.5,
@@ -242,6 +250,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       markerRef.current = marker;
 
       mapInstanceRef.current = map;
+      setMapEpoch(e => e + 1);
 
       // Render Start & Summit Endpoints if route is loaded
       if (latLngs.length > 1) {
@@ -436,6 +445,84 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     };
   }, [liveBreadcrumbs]);
 
+  // HDG UP: rematch pan/drag to screen direction (CSS rotate breaks Leaflet drag axes)
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    const wrap = rotateWrapperRef.current;
+    if (!map || !wrap) return;
+
+    if (!headingUpMode) {
+      map.dragging.enable();
+      return;
+    }
+
+    map.dragging.disable();
+
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    let pointerId: number | null = null;
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      pointerId = e.pointerId;
+      try {
+        wrap.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      setAutoCenterStateRef.current(false);
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragging || (pointerId !== null && e.pointerId !== pointerId)) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (dx === 0 && dy === 0) return;
+
+      // CSS is rotate(-heading); convert screen delta → Leaflet panBy pixels
+      const a = (effectiveHeadingRef.current * Math.PI) / 180;
+      const cos = Math.cos(a);
+      const sin = Math.sin(a);
+      const panX = dx * cos - dy * sin;
+      const panY = dx * sin + dy * cos;
+      map.panBy([-panX, -panY], { animate: false });
+      e.preventDefault();
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (pointerId !== null && e.pointerId !== pointerId) return;
+      dragging = false;
+      pointerId = null;
+      try {
+        wrap.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    };
+
+    wrap.style.touchAction = 'none';
+    wrap.addEventListener('pointerdown', onPointerDown);
+    wrap.addEventListener('pointermove', onPointerMove);
+    wrap.addEventListener('pointerup', onPointerUp);
+    wrap.addEventListener('pointercancel', onPointerUp);
+
+    return () => {
+      wrap.style.touchAction = '';
+      wrap.removeEventListener('pointerdown', onPointerDown);
+      wrap.removeEventListener('pointermove', onPointerMove);
+      wrap.removeEventListener('pointerup', onPointerUp);
+      wrap.removeEventListener('pointercancel', onPointerUp);
+      map.dragging.enable();
+    };
+  }, [headingUpMode, mapEpoch]);
+
   // Update Position & Heading
   useEffect(() => {
     if (mapInstanceRef.current && markerRef.current) {
@@ -446,8 +533,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       if (lat !== undefined && lng !== undefined && !isNaN(lat) && !isNaN(lng)) {
         markerRef.current.setLatLng([lat, lng]);
 
-        // In Heading-Up mode, the map rotates underneath the rider, so the rider arrow points straight UP (0deg)!
-        // In North-Up mode, the map is static, so the arrow rotates by effectiveHeading!
+        // NORTH UP: arrow rotates by heading. HDG UP: map rotates under a screen-up arrow (= travel).
         const needle = mapContainerRef.current?.querySelector('.gps-heading-needle') as HTMLElement | null;
         if (needle) {
           needle.style.transform = headingUpMode ? 'rotate(0deg)' : `rotate(${effectiveHeading}deg)`;
@@ -514,8 +600,9 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   return (
     <div className="relative w-full h-full min-h-[160px] bg-[#e5e9ec] overflow-hidden select-none isolate z-0">
       
-      {/* ROTATING MAP CONTAINER (Matching real-world Magene C706 Heading-Up rotation) */}
+      {/* ROTATING MAP CONTAINER (Heading-Up rotation) */}
       <div
+        ref={rotateWrapperRef}
         className={`w-[160%] h-[160%] -left-[30%] -top-[30%] absolute ${batterySaver ? '' : 'transition-transform duration-300 ease-out'}`}
         style={{
           transform: headingUpMode ? `rotate(${-effectiveHeading}deg)` : 'rotate(0deg)',
@@ -529,9 +616,9 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         />
       </div>
 
-      {/* Top strip: route + swipeable basemap status (keeps map center clear) */}
-      <div className="absolute top-1 left-2 right-12 z-[400] flex items-center gap-1.5 min-w-0 pointer-events-auto">
-        <div className="bg-white/95 backdrop-blur-xs px-2 py-0.5 rounded-md text-[10px] font-bold text-zinc-800 shadow-sm border border-zinc-200 flex items-center gap-1.5 shrink-0 max-w-[42%]">
+      {/* Top strip: route + basemap status (badge width hugs label) */}
+      <div className="absolute top-1 left-2 right-2 z-[400] flex items-center gap-1.5 min-w-0 pointer-events-auto">
+        <div className="bg-white/95 backdrop-blur-xs px-2 py-0.5 rounded-md text-[10px] font-bold text-zinc-800 shadow-sm border border-zinc-200 flex items-center gap-1.5 shrink-0 max-w-[48%]">
           <span className={`w-1.5 h-1.5 rounded-full bg-blue-600 shrink-0 ${batterySaver ? '' : 'animate-pulse'}`} />
           <span className="truncate">
             {routeName || (currentPoint.lat ? `${currentPoint.lat.toFixed(4)}°, ${currentPoint.lng.toFixed(4)}°` : 'Current Location')}
@@ -539,7 +626,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         </div>
         {(basemapError || offlineMapReady !== null) && (
           <div
-            className={`min-w-0 flex-1 overflow-x-auto touch-pan-x overscroll-x-contain rounded-md shadow-sm border [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
+            className={`shrink-0 w-auto max-w-[50%] inline-flex rounded-md shadow-sm border ${
               basemapError
                 ? 'bg-rose-50/95 border-rose-300 text-rose-900'
                 : offlineMapReady
@@ -548,7 +635,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
             }`}
           >
             <div
-              className={`whitespace-nowrap px-1.5 py-0.5 font-sports font-semibold leading-none ${
+              className={`whitespace-nowrap px-1.5 py-0.5 font-sports font-semibold leading-none truncate ${
                 basemapError
                   ? 'text-[9px]'
                   : offlineMapReady
@@ -560,54 +647,36 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
                 ? basemapError
                 : offlineMapReady
                 ? `${activePackName || 'Offline'} map`
-                : 'World overview — Download Maps for offline (OSM)'}
+                : 'World overview'}
             </div>
           </div>
         )}
       </div>
 
-      {/* Scale — sits right of bottom-left next-turn square */}
-      <div className="absolute bottom-2 left-[5.25rem] pointer-events-none flex flex-col items-start z-[400]">
-        <span className="text-[10px] font-digital font-bold text-zinc-800 leading-none drop-shadow-xs">
-          200m
-        </span>
-        <div className="w-12 h-1.5 border-b-2 border-l-2 border-r-2 border-zinc-900 mt-0.5 bg-white/60" />
-      </div>
-
-      {/* ROTATING COMPASS WIDGET - Tap to toggle Heading-Up vs North-Up */}
-      <div className="absolute right-3 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1 z-[400]">
+      {/* Floating Map Controls: Heading mode, Locate/Fit, Zoom */}
+      <div className="absolute bottom-2 right-2 flex flex-col gap-1.5 z-[400] items-end">
         <button
           onClick={handleToggleHeadingUp}
-          className="relative w-10 h-10 rounded-full bg-zinc-900/95 shadow-lg border-2 border-white flex items-center justify-center backdrop-blur-xs active:scale-95 transition-transform"
-          title={headingUpMode ? 'Heading Up (Tap for North Up)' : 'North Up (Tap for Heading Up)'}
+          className="relative w-7 h-7 rounded-lg bg-zinc-900/95 shadow border border-zinc-300 flex items-center justify-center active:scale-95 transition-transform"
+          title={headingUpMode ? 'Heading Up (tap for North Up)' : 'North Up (tap for Heading Up)'}
         >
-          {/* Compass Needle: in Heading-Up mode, points to magnetic North relative to effectiveHeading */}
           <div
             className="w-full h-full flex flex-col items-center justify-center transition-transform duration-300"
             style={{ transform: headingUpMode ? `rotate(${-effectiveHeading}deg)` : 'rotate(0deg)' }}
           >
-            {/* North Point (Red) */}
-            <div className="w-0 h-0 border-x-3.5 border-x-transparent border-b-[8px] border-b-red-500" />
-            {/* South Point (White) */}
-            <div className="w-0 h-0 border-x-3.5 border-x-transparent border-t-[8px] border-t-zinc-200" />
+            <div className="w-0 h-0 border-x-[3px] border-x-transparent border-b-[5px] border-b-red-500" />
+            <div className="w-0 h-0 border-x-[3px] border-x-transparent border-t-[5px] border-t-zinc-200" />
           </div>
-          <span className="absolute text-[8px] font-bold text-white top-0.5 leading-none">N</span>
+          <span className="absolute text-[6px] font-bold text-white top-0 leading-none">N</span>
         </button>
-
-        {/* Heading Mode Label */}
-        <span className="text-[8px] font-sports font-bold px-1.5 py-0.5 rounded bg-zinc-900/90 text-white border border-white/40 shadow-xs uppercase">
-          {headingUpMode ? 'HDG UP' : 'NORTH UP'}
+        <span className="text-[6px] font-sports font-bold px-1 py-px rounded bg-zinc-900/90 text-white border border-white/40 uppercase leading-none">
+          {headingUpMode ? 'HDG' : 'N-UP'}
         </span>
-      </div>
 
-      {/* Floating Map Controls: Locate Me / Fit Route, Zoom */}
-      <div className="absolute bottom-2 right-2 flex flex-col gap-1.5 z-[400]">
-
-        {/* If active route: Fit Entire Route; Otherwise: Locate My Current Position */}
         {routePoints && routePoints.length > 1 ? (
           <button
             onClick={handleFitRoute}
-            className="w-7 h-7 self-end bg-white/95 text-zinc-800 font-bold text-xs rounded-lg shadow flex items-center justify-center hover:bg-white transition-colors border border-zinc-300"
+            className="w-7 h-7 bg-white/95 text-zinc-800 font-bold text-xs rounded-lg shadow flex items-center justify-center hover:bg-white transition-colors border border-zinc-300"
             title="Fit Route Path"
           >
             <MapIcon className="w-3.5 h-3.5" />
@@ -615,15 +684,14 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         ) : (
           <button
             onClick={handleLocateMe}
-            className="w-7 h-7 self-end bg-blue-50 text-blue-600 font-bold text-xs rounded-lg shadow flex items-center justify-center hover:bg-blue-100 transition-colors border border-blue-300"
+            className="w-7 h-7 bg-blue-50 text-blue-600 font-bold text-xs rounded-lg shadow flex items-center justify-center hover:bg-blue-100 transition-colors border border-blue-300"
             title="Snap to My Location"
           >
             <MapPin className="w-3.5 h-3.5" />
           </button>
         )}
 
-        {/* Zoom In / Out */}
-        <div className="flex flex-col gap-1 self-end">
+        <div className="flex flex-col gap-1">
           <button
             onClick={() => {
               if (mapInstanceRef.current) {

@@ -1,5 +1,5 @@
 /**
- * Ride Data Exporter for Magene C706
+ * Ride Data Exporter for ImageneCycle
  * Generates standardized .FIT (Flexible and Interoperable Data Transfer) binary format,
  * standard GPX 1.1 (with Garmin TrackPointExtensions for HR/cadence/power),
  * and JSON telemetry file for offline analytics.
@@ -163,7 +163,7 @@ class BinaryWriter {
  * TrainingPeaks, WKO5, GoldenCheetah, and Intervals.icu.
  *
  * Mapped fields include:
- * - File ID (type: activity, product: Magene C706, serial number, time_created)
+ * - File ID (type: activity, product: ImageneCycle, serial number, time_created)
  * - Device Info (creator device details)
  * - Event messages (Timer Start, Timer Stop)
  * - Record messages (Timestamp, Lat/Long semicircles, Altitude, Speed, Distance,
@@ -204,7 +204,7 @@ export function buildFitBinary(ride: ExportableRideData): Uint8Array {
   dataWriter.writeUint8(0x00); // Data msg, local 0
   dataWriter.writeUint8(4);    // type = 4 (activity)
   dataWriter.writeUint16(1);   // manufacturer = 1 (garmin/generic standard)
-  dataWriter.writeUint16(706); // product = 706 (Magene C706)
+  dataWriter.writeUint16(706); // product id (legacy ImageneCycle / C706-compatible)
   dataWriter.writeUint32(70600001); // serial_number
   dataWriter.writeUint32(fitStartTime); // time_created
 
@@ -541,7 +541,7 @@ export function buildGpxXml(ride: ExportableRideData): string {
   }
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="Magene C706 Cycling Computer"
+<gpx version="1.1" creator="ImageneCycle Cycling Computer"
   xmlns="http://www.topografix.com/GPX/1/1"
   xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -549,7 +549,7 @@ export function buildGpxXml(ride: ExportableRideData): string {
   <metadata>
     <name>${safeName}</name>
     <time>${startTimeIso}</time>
-    <desc>Recorded on Magene C706 Cycling Computer. Distance: ${(ride.distanceMeters / 1000).toFixed(2)} km, Elev Gain: ${Math.round(ride.totalAscentMeters)}m, Avg Speed: ${ride.avgSpeedKmh.toFixed(1)} km/h</desc>
+    <desc>Recorded on ImageneCycle Cycling Computer. Distance: ${(ride.distanceMeters / 1000).toFixed(2)} km, Elev Gain: ${Math.round(ride.totalAscentMeters)}m, Avg Speed: ${ride.avgSpeedKmh.toFixed(1)} km/h</desc>
   </metadata>
   <trk>
     <name>${safeName}</name>
@@ -579,7 +579,7 @@ export function exportRideToGpx(ride: ExportableRideData) {
  */
 export function exportRideToJson(ride: ExportableRideData) {
   const payload = {
-    device: 'Magene C706 Cycling Computer',
+    device: 'ImageneCycle Cycling Computer',
     version: '2.0',
     exportedAt: new Date().toISOString(),
     activity: {

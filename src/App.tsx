@@ -18,8 +18,13 @@ import { getRouteElevation, correctEllipsoidalAltitude, fetchDemElevation } from
 import { MageneDevice } from './components/MageneDevice';
 import { BleSensorModal } from './components/BleSensorModal';
 import { ClimbManualInputModal } from './components/ClimbManualInputModal';
-import { FlutterArchitectureModal } from './components/FlutterArchitectureModal';
 import { RideSummaryModal } from './components/RideSummaryModal';
+import { HistoryRideMap } from './components/HistoryRideMap';
+import {
+  startRecordingNotification,
+  updateRecordingNotification,
+  stopRecordingNotification
+} from './utils/recordingForeground';
 import { StartActivityPrompt } from './components/StartActivityPrompt';
 import { RouteBuilderModal } from './components/RouteBuilderModal';
 import { DownloadMapsModal } from './components/DownloadMapsModal';
@@ -29,7 +34,6 @@ import {
   Upload, 
   Bluetooth, 
   Mountain, 
-  Code2, 
   Compass, 
   RotateCcw, 
   Camera,
@@ -334,7 +338,7 @@ export default function App() {
   const [showStartPrompt, setShowStartPrompt] = useState<boolean>(false);
   const [isSensorModalOpen, setIsSensorModalOpen] = useState<boolean>(false);
   const [isClimbModalOpen, setIsClimbModalOpen] = useState<boolean>(false);
-  const [isFlutterModalOpen, setIsFlutterModalOpen] = useState<boolean>(false);
+  const [historyMapRideId, setHistoryMapRideId] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isResumePrompt, setIsResumePrompt] = useState<boolean>(false);
@@ -367,6 +371,15 @@ export default function App() {
       autoResumeOrStartRef.current();
     });
   }, []);
+
+  // Restore persistent recording notification for orphan / active sessions
+  useEffect(() => {
+    if (!activeSession) return;
+    void startRecordingNotification(
+      isPaused || isAutoPaused ? 'Ride paused' : 'Recording ride…'
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount / session id only
+  }, [activeSession?.id]);
 
   // Sound sync
   useEffect(() => {
@@ -520,7 +533,7 @@ export default function App() {
     };
   }, []);
 
-  // Real Production GPS Tracker with Auto-Pause (<0.5 km/h for >5s) and Auto-Resume
+  // Real Production GPS Tracker with Auto-Pause (<3 km/h for >3s) and Auto-Resume
   useEffect(() => {
     // Only show Searching on cold start — do not wipe Weak/2D/3D when tracker restarts
     setGpsStatus(prev => {
@@ -578,9 +591,9 @@ export default function App() {
           }
         }
 
-        // Auto-resume or auto-start on movement (>= 2.0 km/h) without prompting
+        // Auto-resume on movement (>= 2.0 km/h) when a session already exists
         const isNotActive = !isRecordingRef.current || isPausedRef.current;
-        if (isNotActive && fix.speedKmh >= 2.0) {
+        if (isNotActive && fix.speedKmh >= 3.0) {
           autoResumeOrStartRef.current();
         }
 
@@ -685,15 +698,17 @@ export default function App() {
           errorMessage: err
         });
       },
-      // Auto-Pause & Auto-Resume callback: called when speed < 0.5 km/h for >5 seconds or movement detected
+      // Auto-Pause & Auto-Resume callback: speed < 3 km/h for >3s or movement >= 3 km/h
       (autoPaused: boolean) => {
         if (!isRecordingRef.current) return;
         setIsAutoPaused(autoPaused);
         setIsPaused(autoPaused);
         if (autoPaused) {
           bikeBeeper.beep(1800, 0.1);
+          void updateRecordingNotification('Auto-paused (speed < 3 km/h)');
         } else {
           bikeBeeper.beep(2600, 0.1);
+          void startRecordingNotification('Recording ride…');
         }
       },
       { batterySaver }
@@ -785,7 +800,7 @@ export default function App() {
       setLastLapDistance(distanceTraveled);
       setLastLapTime(curMovingTime);
 
-      // Audio & Haptic alert on the Magene display
+      // Audio & Haptic alert on the ImageneCycle display
       bikeBeeper.lapChime();
       if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
         navigator.vibrate([120, 80, 120]);
@@ -993,9 +1008,10 @@ export default function App() {
     freeRideClimbRecorder.reset();
     setFreeClimbTick(t => t + 1);
     bikeBeeper.beep(2600, 0.12);
+    void startRecordingNotification('Recording ride…');
   };
 
-  // Auto-resume or start on detected movement without prompting
+  // Auto-resume only — never create a session; rider must tap START RIDE
   const handleAutoResumeOrStart = () => {
     if (isRecordingRef.current && !isPausedRef.current) {
       return;
@@ -1019,8 +1035,7 @@ export default function App() {
         saveActiveSession(resumed);
       }
       bikeBeeper.beep(2600, 0.08);
-    } else if (!isRecordingRef.current && !activeSessionRef.current) {
-      handleStartNewActivity();
+      void startRecordingNotification('Recording ride…');
     }
   };
   autoResumeOrStartRef.current = handleAutoResumeOrStart;
@@ -1050,6 +1065,7 @@ export default function App() {
       setActiveSession(resumed);
       saveActiveSession(resumed);
       bikeBeeper.beep(2600, 0.08);
+      void startRecordingNotification('Recording ride…');
       return;
     }
 
@@ -1066,6 +1082,7 @@ export default function App() {
     };
     setActiveSession(paused);
     saveActiveSession(paused);
+    void updateRecordingNotification('Ride paused');
   };
 
   const handleLap = () => {
@@ -1139,6 +1156,7 @@ export default function App() {
     setLatestLapAlert(null);
     setRideHistory(loadRideHistory());
     setIsRideSummaryOpen(false);
+    void stopRecordingNotification();
     bikeBeeper.beep(2600, 0.15);
   };
 
@@ -1152,6 +1170,7 @@ export default function App() {
         sessionBufferRef.current.status = 'recording';
       }
     }
+    void startRecordingNotification('Recording ride…');
     bikeBeeper.beep(2600, 0.08);
   };
 
@@ -1163,6 +1182,7 @@ export default function App() {
     setIsRecording(false);
     setIsPaused(false);
     setIsAutoPaused(false);
+    void stopRecordingNotification();
     setRidingTime(0);
     setSaddleTime(0);
     setTimeElapsed(0);
@@ -1337,7 +1357,7 @@ export default function App() {
   return (
     <div className="w-screen h-screen h-[100dvh] overflow-hidden bg-black flex flex-col items-center justify-center select-none">
       
-      {/* 100% PHONE SCREEN VIEWPORT: PURE MAGENE C706 SCREEN */}
+      {/* 100% PHONE SCREEN VIEWPORT: ImageneCycle SCREEN */}
       <div className="w-full h-full max-w-lg flex flex-col justify-between relative bg-white">
         <MageneDevice
           metrics={metrics}
@@ -1388,7 +1408,7 @@ export default function App() {
                   </div>
                   <div>
                     <h3 className="font-sports font-bold text-sm tracking-wider uppercase text-white">
-                      MAGENE C706 MENU
+                      ImageneCycle MENU
                     </h3>
                     <p className="text-[10px] text-zinc-400">Live GPS, Sensors & Ride History</p>
                   </div>
@@ -1659,7 +1679,7 @@ export default function App() {
                       </span>
                     </div>
                     <p className="text-[10px] text-zinc-400 leading-tight">
-                      Automatically marks laps with dual-tone Magene beeper chime & haptic alert at configured distance splits.
+                      Automatically marks laps with dual-tone ImageneCycle beeper chime & haptic alert at configured distance splits.
                     </p>
                     <div className="grid grid-cols-3 gap-1.5 pt-1">
                       <button
@@ -1728,19 +1748,6 @@ export default function App() {
                       </div>
                     </button>
 
-                    <button
-                      onClick={() => {
-                        setIsMenuDrawerOpen(false);
-                        setIsFlutterModalOpen(true);
-                      }}
-                      className="w-full p-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white flex items-center gap-2.5 text-left font-sports font-bold transition-all shadow-md"
-                    >
-                      <Code2 className="w-4 h-4" />
-                      <div>
-                        <div>Flutter Mobile Source Code</div>
-                        <div className="text-[10px] text-blue-200 font-normal">iOS & Android production files</div>
-                      </div>
-                    </button>
                   </div>
 
                   {/* Optional Custom GPX Upload */}
@@ -1853,7 +1860,16 @@ export default function App() {
                             className="bg-zinc-850 border border-zinc-800 rounded-xl p-3 text-xs font-sports"
                           >
                             <div className="flex items-center justify-between text-zinc-200 font-bold mb-1">
-                              <span className="truncate pr-2">{ride.routeName}</span>
+                              <button
+                                type="button"
+                                className="truncate pr-2 text-left hover:text-emerald-300 transition-colors"
+                                title="View ride map"
+                                onClick={() =>
+                                  setHistoryMapRideId(prev => (prev === ride.id ? null : ride.id))
+                                }
+                              >
+                                {ride.routeName}
+                              </button>
                               <button
                                 onClick={() => handleDeleteHistoryItem(ride.id)}
                                 className="text-zinc-500 hover:text-red-400 p-0.5"
@@ -1881,6 +1897,15 @@ export default function App() {
                                 <span className="font-bold text-blue-400">{timeStr}</span>
                               </div>
                             </div>
+
+                            {historyMapRideId === ride.id && (
+                              <div className="mt-2">
+                                <HistoryRideMap
+                                  breadcrumbs={ride.breadcrumbs || []}
+                                  className="h-[140px] w-full"
+                                />
+                              </div>
+                            )}
 
                             <div className="mt-2.5 pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-1 text-[10px]">
                               <button
@@ -2270,7 +2295,7 @@ export default function App() {
         document.body
       )}
 
-      {/* Sensor Pairing, Manual Climb, Flutter, Ride Summary & Start Activity Modals (Portaled to body at z-[99999]) */}
+      {/* Sensor Pairing, Manual Climb, Ride Summary & Start Activity Modals (Portaled to body at z-[99999]) */}
       {typeof document !== 'undefined' && createPortal(
         <>
           <RideSummaryModal
@@ -2339,11 +2364,6 @@ export default function App() {
           <MapsStorageModal
             isOpen={isMapsStorageOpen}
             onClose={() => setIsMapsStorageOpen(false)}
-          />
-
-          <FlutterArchitectureModal
-            isOpen={isFlutterModalOpen}
-            onClose={() => setIsFlutterModalOpen(false)}
           />
         </>,
         document.body

@@ -59,7 +59,7 @@ function generateCurvedPoints(
 }
 
 /**
- * Route 1: Arsicana Hill Climb (Pixel-Accurate to the Magene C706 User Screenshot)
+ * Route 1: Arsicana Hill Climb
  * Screenshot state corresponds to:
  * Time: 00:02:15
  * Dist Remain: 1.08 km

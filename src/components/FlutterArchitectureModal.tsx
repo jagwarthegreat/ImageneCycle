@@ -43,17 +43,17 @@ import 'package:latlong2/latlong.dart';
 import '../models/cycling_metrics.dart';
 import 'climb_pro_painter.dart';
 
-/// Magene C706 Screen Widget
-/// Pixel-accurate responsive layout matching the Magene C706 bike computer
+/// ImageneCycle Screen Widget
+/// Responsive layout for the ImageneCycle bike computer
 /// Adapts seamlessly to iOS & Android screen sizes and orientations.
-class MageneC706Screen extends StatelessWidget {
+class ImageneCycleScreen extends StatelessWidget {
   final RideMetrics metrics;
   final ClimbProState climbState;
   final List<LatLng> routePolyline;
   final LatLng currentPosition;
   final double heading;
 
-  const MageneC706Screen({
+  const ImageneCycleScreen({
     Key? key,
     required this.metrics,
     required this.climbState,
@@ -724,7 +724,7 @@ class ClimbProPainter extends CustomPainter {
 
     pubspec: `# pubspec.yaml
 name: magene_c706_flutter
-description: Magene C706 Bike Computer Clone with ClimbPro and BLE Integration
+description: ImageneCycle Bike Computer with ClimbPro and BLE Integration
 version: 1.0.0+1
 
 environment:
@@ -768,13 +768,13 @@ flutter:
 <dict>
     <!-- CoreBluetooth Permissions -->
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>Magene C706 requires Bluetooth to connect to Heart Rate, Cadence, and Cycling Power meters.</string>
+    <string>ImageneCycle requires Bluetooth to connect to Heart Rate, Cadence, and Cycling Power meters.</string>
     <key>NSBluetoothPeripheralUsageDescription</key>
     <string>Connect to cycling sensors during rides.</string>
 
     <!-- CoreLocation Permissions -->
     <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Magene C706 requires GPS to track route positioning and ClimbPro elevation profiles.</string>
+    <string>ImageneCycle requires GPS to track route positioning and ClimbPro elevation profiles.</string>
     <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
     <string>Continuous ride GPS tracking when phone is mounted or screen locked.</string>
 </dict>`

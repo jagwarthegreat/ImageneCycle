@@ -1,20 +1,21 @@
 /**
- * Real Web Bluetooth Low Energy (BLE) Manager for standard cycling sensors
+ * Capacitor native BLE manager for standard cycling sensors
+ * (via @capacitor-community/bluetooth-le)
  * Supports:
  * - Heart Rate Monitors (GATT 0x180D / 0x2A37)
  * - Cycling Speed & Cadence Sensors (GATT 0x1816 / 0x2A5B)
  * - Cycling Power Meters (GATT 0x1818 / 0x2A63)
- * - Device Battery Level (GATT 0x180F / 0x2A19)
  */
 
-// Ambient typing support for Web Bluetooth API
-declare global {
-  interface Navigator {
-    bluetooth?: any;
-  }
-}
+import { BleClient } from '@capacitor-community/bluetooth-le';
+import { Capacitor } from '@capacitor/core';
 
-type BleDevice = any;
+const HEART_RATE_SERVICE = '0000180d-0000-1000-8000-00805f9b34fb';
+const HEART_RATE_MEASUREMENT = '00002a37-0000-1000-8000-00805f9b34fb';
+const CSC_SERVICE = '00001816-0000-1000-8000-00805f9b34fb';
+const CSC_MEASUREMENT = '00002a5b-0000-1000-8000-00805f9b34fb';
+const POWER_SERVICE = '00001818-0000-1000-8000-00805f9b34fb';
+const POWER_MEASUREMENT = '00002a63-0000-1000-8000-00805f9b34fb';
 
 export interface BlePacketLog {
   timestamp: string;
@@ -31,9 +32,9 @@ export type BleCallback = (data: {
 }) => void;
 
 class BleManager {
-  private hrmDevice: BleDevice | null = null;
-  private cscDevice: BleDevice | null = null;
-  private powerDevice: BleDevice | null = null;
+  private hrmDeviceId: string | null = null;
+  private cscDeviceId: string | null = null;
+  private powerDeviceId: string | null = null;
 
   private prevCrankRevs: number | null = null;
   private prevCrankTime: number | null = null;
@@ -44,9 +45,16 @@ class BleManager {
   private listeners: Set<BleCallback> = new Set();
   public packetLogs: BlePacketLog[] = [];
   private logListeners: Set<(logs: BlePacketLog[]) => void> = new Set();
+  private initialized = false;
 
   public isSupported(): boolean {
-    return typeof navigator !== 'undefined' && 'bluetooth' in navigator;
+    return Capacitor.isNativePlatform() || Capacitor.getPlatform() === 'web';
+  }
+
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) return;
+    await BleClient.initialize({ androidNeverForLocation: true });
+    this.initialized = true;
   }
 
   public subscribe(cb: BleCallback): () => void {
@@ -66,8 +74,77 @@ class BleManager {
     this.logListeners.forEach(cb => cb(this.packetLogs));
   }
 
-  private notify(data: { heartRate?: number; cadence?: number; speed?: number; power?: number; batteryLevel?: number }) {
+  private notify(data: {
+    heartRate?: number;
+    cadence?: number;
+    speed?: number;
+    power?: number;
+    batteryLevel?: number;
+  }) {
     this.listeners.forEach(cb => cb(data));
+  }
+
+  private parseHeartRate(val: DataView) {
+    const flags = val.getUint8(0);
+    const is16Bit = (flags & 0x01) !== 0;
+    const hr = is16Bit ? val.getUint16(1, true) : val.getUint8(1);
+    this.notify({ heartRate: hr });
+    this.addLog('HRM', `HR: ${hr} bpm (Flags: 0x${flags.toString(16)})`);
+  }
+
+  private parseCsc(val: DataView) {
+    const flags = val.getUint8(0);
+    let offset = 1;
+
+    let speedKmh: number | undefined;
+    let cadenceRpm: number | undefined;
+
+    if (flags & 0x01) {
+      const wheelRevs = val.getUint32(offset, true);
+      offset += 4;
+      const wheelTime = val.getUint16(offset, true);
+      offset += 2;
+
+      if (this.prevWheelRevs !== null && this.prevWheelTime !== null) {
+        let dRevs = wheelRevs - this.prevWheelRevs;
+        let dTime = (wheelTime - this.prevWheelTime) / 1024;
+        if (dTime < 0) dTime += 65536 / 1024;
+        if (dTime > 0 && dRevs >= 0) {
+          const metersPerSec = (dRevs * this.wheelCircumferenceMeters) / dTime;
+          speedKmh = Math.round(metersPerSec * 3.6 * 10) / 10;
+        }
+      }
+      this.prevWheelRevs = wheelRevs;
+      this.prevWheelTime = wheelTime;
+    }
+
+    if (flags & 0x02) {
+      const crankRevs = val.getUint16(offset, true);
+      offset += 2;
+      const crankTime = val.getUint16(offset, true);
+      offset += 2;
+
+      if (this.prevCrankRevs !== null && this.prevCrankTime !== null) {
+        let dRevs = crankRevs - this.prevCrankRevs;
+        let dTime = (crankTime - this.prevCrankTime) / 1024;
+        if (dTime < 0) dTime += 65536 / 1024;
+        if (dTime > 0 && dRevs >= 0) {
+          cadenceRpm = Math.round((dRevs / dTime) * 60);
+        }
+      }
+      this.prevCrankRevs = crankRevs;
+      this.prevCrankTime = crankTime;
+    }
+
+    this.notify({ speed: speedKmh, cadence: cadenceRpm });
+    this.addLog('CSC', `Cadence: ${cadenceRpm ?? '--'} rpm | Speed: ${speedKmh ?? '--'} km/h`);
+  }
+
+  private parsePower(val: DataView) {
+    const flags = val.getUint16(0, true);
+    const powerWatts = val.getInt16(2, true);
+    this.notify({ power: Math.max(0, powerWatts) });
+    this.addLog('POWER', `Power: ${powerWatts} Watts (Flags: 0x${flags.toString(16)})`);
   }
 
   /**
@@ -75,36 +152,25 @@ class BleManager {
    */
   public async connectHeartRate(): Promise<{ success: boolean; deviceName?: string; error?: string }> {
     if (!this.isSupported()) {
-      return { success: false, error: 'Web Bluetooth is not supported in this browser.' };
+      return { success: false, error: 'Bluetooth LE is not available on this platform.' };
     }
 
     try {
+      await this.ensureInitialized();
       this.addLog('SYSTEM', 'Scanning for Bluetooth Heart Rate Monitors (0x180D)...');
-      const device = await navigator.bluetooth.requestDevice({
-        filters: [{ services: ['heart_rate'] }],
-        optionalServices: ['battery_service']
-      });
-
-      this.hrmDevice = device;
-      device.addEventListener('gattserverdisconnected', () => {
+      const device = await BleClient.requestDevice({ services: [HEART_RATE_SERVICE] });
+      await BleClient.connect(device.deviceId, () => {
         this.addLog('HRM', `Disconnected: ${device.name || 'HRM'}`);
+        this.hrmDeviceId = null;
       });
+      this.hrmDeviceId = device.deviceId;
 
-      const server = await device.gatt?.connect();
-      if (!server) throw new Error('Could not connect to GATT Server.');
-
-      const service = await server.getPrimaryService('heart_rate');
-      const char = await service.getCharacteristic('heart_rate_measurement');
-      await char.startNotifications();
-
-      char.addEventListener('characteristicvaluechanged', (event: any) => {
-        const val: DataView = event.target.value;
-        const flags = val.getUint8(0);
-        const is16Bit = (flags & 0x01) !== 0;
-        const hr = is16Bit ? val.getUint16(1, true) : val.getUint8(1);
-        this.notify({ heartRate: hr });
-        this.addLog('HRM', `HR: ${hr} bpm (Flags: 0x${flags.toString(16)})`);
-      });
+      await BleClient.startNotifications(
+        device.deviceId,
+        HEART_RATE_SERVICE,
+        HEART_RATE_MEASUREMENT,
+        value => this.parseHeartRate(value)
+      );
 
       this.addLog('HRM', `Connected: ${device.name || 'Heart Rate Monitor'}`);
       return { success: true, deviceName: device.name || 'BLE Heart Rate' };
@@ -119,74 +185,25 @@ class BleManager {
    */
   public async connectCadenceSpeed(): Promise<{ success: boolean; deviceName?: string; error?: string }> {
     if (!this.isSupported()) {
-      return { success: false, error: 'Web Bluetooth is not supported in this browser.' };
+      return { success: false, error: 'Bluetooth LE is not available on this platform.' };
     }
 
     try {
+      await this.ensureInitialized();
       this.addLog('SYSTEM', 'Scanning for Cycling Speed & Cadence (0x1816)...');
-      const device = await navigator.bluetooth.requestDevice({
-        filters: [{ services: ['cycling_speed_and_cadence'] }],
-        optionalServices: ['battery_service']
+      const device = await BleClient.requestDevice({ services: [CSC_SERVICE] });
+      await BleClient.connect(device.deviceId, () => {
+        this.addLog('CSC', `Disconnected: ${device.name || 'CSC'}`);
+        this.cscDeviceId = null;
       });
+      this.cscDeviceId = device.deviceId;
 
-      this.cscDevice = device;
-      const server = await device.gatt?.connect();
-      if (!server) throw new Error('Could not connect to CSC GATT.');
-
-      const service = await server.getPrimaryService('cycling_speed_and_cadence');
-      const char = await service.getCharacteristic('csc_measurement');
-      await char.startNotifications();
-
-      char.addEventListener('characteristicvaluechanged', (event: any) => {
-        const val: DataView = event.target.value;
-        const flags = val.getUint8(0);
-        let offset = 1;
-
-        let speedKmh: number | undefined;
-        let cadenceRpm: number | undefined;
-
-        // Wheel Revolutions Present (bit 0)
-        if (flags & 0x01) {
-          const wheelRevs = val.getUint32(offset, true);
-          offset += 4;
-          const wheelTime = val.getUint16(offset, true); // in 1/1024 s
-          offset += 2;
-
-          if (this.prevWheelRevs !== null && this.prevWheelTime !== null) {
-            let dRevs = wheelRevs - this.prevWheelRevs;
-            let dTime = (wheelTime - this.prevWheelTime) / 1024;
-            if (dTime < 0) dTime += 65536 / 1024; // 16-bit rollover
-            if (dTime > 0 && dRevs >= 0) {
-              const metersPerSec = (dRevs * this.wheelCircumferenceMeters) / dTime;
-              speedKmh = Math.round(metersPerSec * 3.6 * 10) / 10;
-            }
-          }
-          this.prevWheelRevs = wheelRevs;
-          this.prevWheelTime = wheelTime;
-        }
-
-        // Crank Revolutions Present (bit 1)
-        if (flags & 0x02) {
-          const crankRevs = val.getUint16(offset, true);
-          offset += 2;
-          const crankTime = val.getUint16(offset, true); // in 1/1024 s
-          offset += 2;
-
-          if (this.prevCrankRevs !== null && this.prevCrankTime !== null) {
-            let dRevs = crankRevs - this.prevCrankRevs;
-            let dTime = (crankTime - this.prevCrankTime) / 1024;
-            if (dTime < 0) dTime += 65536 / 1024;
-            if (dTime > 0 && dRevs >= 0) {
-              cadenceRpm = Math.round((dRevs / dTime) * 60);
-            }
-          }
-          this.prevCrankRevs = crankRevs;
-          this.prevCrankTime = crankTime;
-        }
-
-        this.notify({ speed: speedKmh, cadence: cadenceRpm });
-        this.addLog('CSC', `Cadence: ${cadenceRpm ?? '--'} rpm | Speed: ${speedKmh ?? '--'} km/h`);
-      });
+      await BleClient.startNotifications(
+        device.deviceId,
+        CSC_SERVICE,
+        CSC_MEASUREMENT,
+        value => this.parseCsc(value)
+      );
 
       this.addLog('CSC', `Connected: ${device.name || 'CSC Sensor'}`);
       return { success: true, deviceName: device.name || 'BLE Cadence Sensor' };
@@ -201,31 +218,25 @@ class BleManager {
    */
   public async connectPowerMeter(): Promise<{ success: boolean; deviceName?: string; error?: string }> {
     if (!this.isSupported()) {
-      return { success: false, error: 'Web Bluetooth is not supported in this browser.' };
+      return { success: false, error: 'Bluetooth LE is not available on this platform.' };
     }
 
     try {
+      await this.ensureInitialized();
       this.addLog('SYSTEM', 'Scanning for Cycling Power Meter (0x1818)...');
-      const device = await navigator.bluetooth.requestDevice({
-        filters: [{ services: ['cycling_power'] }],
-        optionalServices: ['battery_service']
+      const device = await BleClient.requestDevice({ services: [POWER_SERVICE] });
+      await BleClient.connect(device.deviceId, () => {
+        this.addLog('POWER', `Disconnected: ${device.name || 'Power'}`);
+        this.powerDeviceId = null;
       });
+      this.powerDeviceId = device.deviceId;
 
-      this.powerDevice = device;
-      const server = await device.gatt?.connect();
-      if (!server) throw new Error('Could not connect to Power GATT.');
-
-      const service = await server.getPrimaryService('cycling_power');
-      const char = await service.getCharacteristic('cycling_power_measurement');
-      await char.startNotifications();
-
-      char.addEventListener('characteristicvaluechanged', (event: any) => {
-        const val: DataView = event.target.value;
-        const flags = val.getUint16(0, true);
-        const powerWatts = val.getInt16(2, true);
-        this.notify({ power: Math.max(0, powerWatts) });
-        this.addLog('POWER', `Power: ${powerWatts} Watts (Flags: 0x${flags.toString(16)})`);
-      });
+      await BleClient.startNotifications(
+        device.deviceId,
+        POWER_SERVICE,
+        POWER_MEASUREMENT,
+        value => this.parsePower(value)
+      );
 
       this.addLog('POWER', `Connected: ${device.name || 'Power Meter'}`);
       return { success: true, deviceName: device.name || 'BLE Power Meter' };
@@ -235,10 +246,54 @@ class BleManager {
     }
   }
 
-  public disconnectAll() {
-    if (this.hrmDevice?.gatt?.connected) this.hrmDevice.gatt.disconnect();
-    if (this.cscDevice?.gatt?.connected) this.cscDevice.gatt.disconnect();
-    if (this.powerDevice?.gatt?.connected) this.powerDevice.gatt.disconnect();
+  public async disconnectAll() {
+    const slots: Array<{
+      id: string | null;
+      service: string;
+      characteristic: string;
+      clear: () => void;
+    }> = [
+      {
+        id: this.hrmDeviceId,
+        service: HEART_RATE_SERVICE,
+        characteristic: HEART_RATE_MEASUREMENT,
+        clear: () => {
+          this.hrmDeviceId = null;
+        }
+      },
+      {
+        id: this.cscDeviceId,
+        service: CSC_SERVICE,
+        characteristic: CSC_MEASUREMENT,
+        clear: () => {
+          this.cscDeviceId = null;
+        }
+      },
+      {
+        id: this.powerDeviceId,
+        service: POWER_SERVICE,
+        characteristic: POWER_MEASUREMENT,
+        clear: () => {
+          this.powerDeviceId = null;
+        }
+      }
+    ];
+
+    for (const slot of slots) {
+      if (!slot.id) continue;
+      try {
+        await BleClient.stopNotifications(slot.id, slot.service, slot.characteristic);
+      } catch {
+        /* already gone */
+      }
+      try {
+        await BleClient.disconnect(slot.id);
+      } catch {
+        /* already gone */
+      }
+      slot.clear();
+    }
+
     this.addLog('SYSTEM', 'All BLE hardware sensors disconnected.');
   }
 }
