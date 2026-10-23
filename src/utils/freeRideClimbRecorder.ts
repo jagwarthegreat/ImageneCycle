@@ -32,6 +32,11 @@ export class FreeRideClimbRecorder {
     return this.draft;
   }
 
+  /** Live free-ride track for ClimbPro route-profile preview (no planned course). */
+  getSamples(): RoutePoint[] {
+    return this.samples;
+  }
+
   /**
    * Push a sample while recording. distMeters = cumulative ride distance.
    */

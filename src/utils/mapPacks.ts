@@ -4,6 +4,7 @@
  * Map = PMTiles (OSM/Protomaps); N/T = Magene JSON. Not Guru .vm/.rt/.elv.
  */
 
+import { Capacitor } from '@capacitor/core';
 import { FileSource, PMTiles } from 'pmtiles';
 import {
   deletePackFile,
@@ -353,7 +354,77 @@ export async function resolveActiveBasemapUrl(
 export type DownloadProgress = { done: number; total: number; pct: number };
 
 export function mapPackNotHostedMessage(url: string): string {
-  return `Map pack not published yet at ${url}. On the server run: npm run maps:ph`;
+  if (Capacitor.isNativePlatform()) {
+    return `Map pack not in this app build (${url}). Philippines installs from the bundled file when present; other countries need cloud hosting later.`;
+  }
+  return `Map pack not available at ${url}. For local web, place the .pmtiles under public/maps/packs/ (npm run maps:ph).`;
+}
+
+function looksLikePmtilesUrl(url: string): boolean {
+  return url.endsWith('.pmtiles') || url.includes('.pmtiles');
+}
+
+function magicLooksValid(url: string, buf: Uint8Array): boolean {
+  if (!buf.length) return false;
+  if (looksLikePmtilesUrl(url)) return magicAscii(buf, 7) === 'PMTiles';
+  return buf[0] === 0x7b; // '{'
+}
+
+/**
+ * Read only the first ~16 bytes then abort — Capacitor asset server often ignores Range.
+ */
+async function probePackMagicPrefix(url: string): Promise<boolean> {
+  const ac = new AbortController();
+  try {
+    const res = await fetch(url, { signal: ac.signal, cache: 'no-cache' });
+    if (!res.ok) return false;
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (ct.includes('text/html')) return false;
+
+    const reader = res.body?.getReader();
+    if (!reader) {
+      const buf = new Uint8Array(await res.arrayBuffer());
+      return magicLooksValid(url, buf.slice(0, 16));
+    }
+
+    const chunks: Uint8Array[] = [];
+    let got = 0;
+    while (got < 16) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value?.length) {
+        chunks.push(value);
+        got += value.length;
+      }
+    }
+    ac.abort();
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
+    const merged = new Uint8Array(got);
+    let off = 0;
+    for (const c of chunks) {
+      merged.set(c.subarray(0, Math.min(c.length, merged.length - off)), off);
+      off += c.length;
+      if (off >= merged.length) break;
+    }
+    return magicLooksValid(url, merged);
+  } catch {
+    return false;
+  } finally {
+    ac.abort();
+  }
+}
+
+/**
+ * True when catalog URL serves a valid pack (app-bundled asset or remote).
+ * Tries Range first, then a short streamed GET for Capacitor/WebView hosts.
+ */
+export async function isPackSourceAvailable(url: string): Promise<boolean> {
+  if (await isRemotePackHosted(url)) return true;
+  return probePackMagicPrefix(url);
 }
 
 export async function downloadMapLayer(
@@ -373,8 +444,8 @@ export async function downloadMapLayer(
   }
 
   if (layer === 'map') {
-    const hosted = await isRemotePackHosted(spec.url);
-    if (!hosted) {
+    const available = await isPackSourceAvailable(spec.url);
+    if (!available) {
       throw new Error(mapPackNotHostedMessage(spec.url));
     }
   }
@@ -386,7 +457,7 @@ export async function downloadMapLayer(
   const res = await fetch(spec.url, { signal: ac.signal, cache: 'no-cache' });
   if (!res.ok) {
     if (layer === 'map') throw new Error(mapPackNotHostedMessage(spec.url));
-    throw new Error(`Download failed (${res.status}). Host the OSM pack at ${spec.url} or check your connection.`);
+    throw new Error(`Download failed (${res.status}). Check ${spec.url} or your connection.`);
   }
 
   const contentType = (res.headers.get('content-type') || '').toLowerCase();
@@ -476,12 +547,13 @@ export function packTotalBytes(pack: MapPackCatalogEntry): number {
   return n;
 }
 
-/** Country layers are never bundled with the SPA. */
-export function isLayerBundled(_pack: MapPackCatalogEntry, _layer: MapLayerKind): boolean {
-  return false;
+/** Relative catalog URLs are served from the app bundle (Vite/Capacitor assets). */
+export function isLayerBundled(pack: MapPackCatalogEntry, layer: MapLayerKind): boolean {
+  const url = pack.layers[layer]?.url;
+  return !!url && url.startsWith('/');
 }
 
-/** Optional: probe whether a remote catalog URL is currently hostable (for UI hints). */
+/** Probe via HTTP Range (CDN / Vite). Capacitor assets often ignore Range — use isPackSourceAvailable. */
 export async function isRemotePackHosted(url: string): Promise<boolean> {
   try {
     const res = await fetch(url, {
@@ -492,11 +564,21 @@ export async function isRemotePackHosted(url: string): Promise<boolean> {
     if (!(res.ok || res.status === 206)) return false;
     const ct = (res.headers.get('content-type') || '').toLowerCase();
     if (ct.includes('text/html')) return false;
-    const buf = new Uint8Array(await res.arrayBuffer());
-    if (url.endsWith('.pmtiles') || url.includes('.pmtiles')) {
-      return magicAscii(buf, 7) === 'PMTiles';
+
+    // Hosts that ignore Range may return the whole ~700MB body as 200 — never buffer that.
+    const contentRange = res.headers.get('content-range');
+    const contentLength = Number(res.headers.get('content-length') || 0);
+    if (res.status !== 206 && !contentRange && contentLength > 64) {
+      try {
+        await res.body?.cancel();
+      } catch {
+        /* ignore */
+      }
+      return false;
     }
-    return buf.length > 0 && buf[0] === 0x7b; // '{'
+
+    const buf = new Uint8Array(await res.arrayBuffer());
+    return magicLooksValid(url, buf);
   } catch {
     return false;
   }

@@ -41,6 +41,8 @@ interface MageneDeviceProps {
   climbState: ClimbProLiveState;
   currentPoint: RoutePoint;
   routePoints?: RoutePoint[];
+  /** Elevation / ClimbPro profile (planned route or free-ride samples). Falls back to routePoints. */
+  climbProfilePoints?: RoutePoint[];
   routeTurns?: RouteTurn[];
   bleStatus: BleDeviceStatus;
   gpsStatus: GpsStatus;
@@ -68,6 +70,8 @@ interface MageneDeviceProps {
   basemapToken?: number;
   autoCenter?: boolean;
   onToggleAutoCenter?: () => void;
+  /** Absolute set (drag pause / locate) — preferred over toggle */
+  onAutoCenterChange?: (enabled: boolean) => void;
   invertHeading?: boolean;
   onToggleInvertHeading?: () => void;
 }
@@ -123,6 +127,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   climbState,
   currentPoint,
   routePoints = [],
+  climbProfilePoints,
   routeTurns = [],
   bleStatus,
   gpsStatus,
@@ -148,6 +153,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   basemapToken = 0,
   autoCenter,
   onToggleAutoCenter,
+  onAutoCenterChange,
   invertHeading,
   onToggleInvertHeading
 }) => {
@@ -181,6 +187,8 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   };
 
   const hasActiveRoute = routePoints.length > 1;
+  const climbChartPoints =
+    climbProfilePoints && climbProfilePoints.length > 1 ? climbProfilePoints : routePoints;
   // Route-level remain (not climb-only) so 0-climb courses still show directions
   const routeDistRemainM = hasActiveRoute
     ? getRouteRemainingDistanceMeters(routePoints, metrics.distanceTraveled)
@@ -503,6 +511,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 basemapToken={basemapToken}
                 autoCenter={autoCenter}
                 onToggleAutoCenter={onToggleAutoCenter}
+                onAutoCenterChange={onAutoCenterChange}
                 invertHeading={invertHeading}
                 onToggleInvertHeading={onToggleInvertHeading}
               />
@@ -516,7 +525,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             <div className="w-full shrink-0">
               <ClimbProElevationChart
                 climb={climbState.currentClimb || climbState.nextClimb}
-                routePoints={routePoints}
+                routePoints={climbChartPoints}
                 currentDist={metrics.distanceTraveled}
                 currentGrade={metrics.currentGrade}
                 avgGradeRemaining={profileAvgGrade}
@@ -659,7 +668,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
             <div className="border border-zinc-200 rounded-xl overflow-hidden shadow-xs my-1">
               <ClimbProElevationChart
                 climb={climbState.currentClimb || climbState.nextClimb}
-                routePoints={routePoints}
+                routePoints={climbChartPoints}
                 currentDist={metrics.distanceTraveled}
                 currentGrade={metrics.currentGrade}
                 avgGradeRemaining={profileAvgGrade}
@@ -850,6 +859,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 basemapToken={basemapToken}
                 autoCenter={autoCenter}
                 onToggleAutoCenter={onToggleAutoCenter}
+                onAutoCenterChange={onAutoCenterChange}
                 invertHeading={invertHeading}
                 onToggleInvertHeading={onToggleInvertHeading}
               />

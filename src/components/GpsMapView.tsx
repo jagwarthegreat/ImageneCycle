@@ -1,11 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { leafletLayer } from 'protomaps-leaflet';
 import { RoutePoint } from '../types/cycling';
 import { createCachedTileLayer } from '../utils/tileCache';
 import { resolveActiveBasemap } from '../utils/mapPacks';
-import { Map as MapIcon, MapPin } from 'lucide-react';
+import {
+  createOfflineBasemapLayer,
+  loadMapDetailsPref,
+  saveMapDetailsPref
+} from '../utils/offlineMapStyle';
+import { Layers, Map as MapIcon, MapPin } from 'lucide-react';
 
 function attachWorldOverview(map: L.Map, isDarkMode: boolean): L.Layer {
   // World overview — not a country offline pack (needs network). No country roads from app bundle.
@@ -24,19 +28,17 @@ async function attachBasemap(
   map: L.Map,
   isDarkMode: boolean,
   lat: number,
-  lng: number
+  lng: number,
+  details: boolean
 ): Promise<{ layer: L.Layer; offline: boolean; packName?: string; error?: string }> {
   const active = await resolveActiveBasemap(lat || 14.5995, lng || 120.9842);
   if (active?.pmtiles) {
     try {
-      // Pass PMTiles instance (FileSource) — blob:/http URLs do not paint offline archives
-      // Cast: app uses pmtiles@4 FileSource; protomaps-leaflet types pin pmtiles@3 — duck-typed at runtime
-      const layer = leafletLayer({
-        url: active.pmtiles as unknown as string,
-        flavor: isDarkMode ? 'dark' : 'light',
-        lang: 'en',
-        attribution: '© OpenStreetMap · Protomaps'
-      }) as unknown as L.GridLayer;
+      const layer = createOfflineBasemapLayer({
+        pmtiles: active.pmtiles,
+        isDarkMode,
+        details
+      });
       layer.addTo(map);
       layer.bringToBack?.();
       return { layer, offline: true, packName: active.packName };
@@ -69,6 +71,7 @@ interface GpsMapViewProps {
   basemapToken?: number;
   autoCenter?: boolean;
   onToggleAutoCenter?: () => void;
+  onAutoCenterChange?: (enabled: boolean) => void;
   invertHeading?: boolean;
   onToggleInvertHeading?: () => void;
 }
@@ -86,6 +89,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   basemapToken = 0,
   autoCenter: propAutoCenter,
   onToggleAutoCenter,
+  onAutoCenterChange,
   invertHeading: propInvertHeading,
   onToggleInvertHeading
 }) => {
@@ -101,6 +105,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const [offlineMapReady, setOfflineMapReady] = useState<boolean | null>(null);
   const [activePackName, setActivePackName] = useState<string | null>(null);
   const [basemapError, setBasemapError] = useState<string | null>(null);
+  const [mapDetails, setMapDetails] = useState(() => loadMapDetailsPref());
   const hasCenteredInitiallyRef = useRef<boolean>(false);
   const pendingBreadcrumbsRef = useRef<{ lat: number; lng: number }[] | null>(null);
   const breadcrumbRafRef = useRef<number | null>(null);
@@ -112,16 +117,19 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const autoCenter = propAutoCenter !== undefined ? propAutoCenter : internalAutoCenter;
   const onToggleAutoCenterRef = useRef(onToggleAutoCenter);
   onToggleAutoCenterRef.current = onToggleAutoCenter;
+  const onAutoCenterChangeRef = useRef(onAutoCenterChange);
+  onAutoCenterChangeRef.current = onAutoCenterChange;
   const autoCenterRef = useRef(autoCenter);
   autoCenterRef.current = autoCenter;
 
   const setAutoCenterState = (val: boolean) => {
-    if (val !== autoCenterRef.current) {
-      if (onToggleAutoCenterRef.current) {
-        onToggleAutoCenterRef.current();
-      } else {
-        setInternalAutoCenter(val);
-      }
+    if (val === autoCenterRef.current) return;
+    if (onAutoCenterChangeRef.current) {
+      onAutoCenterChangeRef.current(val);
+    } else if (onToggleAutoCenterRef.current) {
+      onToggleAutoCenterRef.current();
+    } else {
+      setInternalAutoCenter(val);
     }
   };
 
@@ -285,10 +293,16 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     };
   }, []);
 
-  const lastBasemapParamsRef = useRef<{ isDark: boolean; token: number; lat: number; lng: number } | null>(null);
+  const lastBasemapParamsRef = useRef<{
+    isDark: boolean;
+    token: number;
+    lat: number;
+    lng: number;
+    details: boolean;
+  } | null>(null);
 
   // Swap day/night / pack basemap (PMTiles flavor or raster URL)
-  // Only re-attach when dark mode, map token, or region genuinely changes — NOT on every raw coordinate tick!
+  // Only re-attach when dark mode, map token, details, or region genuinely changes — NOT on every raw coordinate tick!
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
@@ -301,14 +315,21 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       !prev ||
       prev.isDark !== isDarkMode ||
       prev.token !== basemapToken ||
+      prev.details !== mapDetails ||
       Math.abs(prev.lat - lat) > 0.5 ||
       Math.abs(prev.lng - lng) > 0.5;
 
     if (!needsUpdate) return;
-    lastBasemapParamsRef.current = { isDark: isDarkMode, token: basemapToken, lat, lng };
+    lastBasemapParamsRef.current = {
+      isDark: isDarkMode,
+      token: basemapToken,
+      lat,
+      lng,
+      details: mapDetails
+    };
 
     let cancelled = false;
-    void attachBasemap(map, isDarkMode, lat, lng).then(({ layer, offline, packName, error }) => {
+    void attachBasemap(map, isDarkMode, lat, lng, mapDetails).then(({ layer, offline, packName, error }) => {
       if (cancelled || mapInstanceRef.current !== map) {
         map.removeLayer(layer);
         return;
@@ -324,7 +345,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isDarkMode, basemapToken, currentPoint.lat, currentPoint.lng]);
+  }, [isDarkMode, basemapToken, mapDetails, currentPoint.lat, currentPoint.lng]);
 
   // Helper to render start/finish markers and navigation chevrons
   const updateEndpointsAndChevrons = (map: L.Map, latLngs: [number, number][]) => {
@@ -653,8 +674,39 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         )}
       </div>
 
-      {/* Floating Map Controls: Heading mode, Locate/Fit, Zoom */}
+      {/* Floating Map Controls: Details, Heading mode, Locate/Fit, Zoom */}
       <div className="absolute bottom-2 right-2 flex flex-col gap-1.5 z-[400] items-end">
+        <button
+          type="button"
+          disabled={!offlineMapReady}
+          onClick={() => {
+            setMapDetails(prev => {
+              const next = !prev;
+              saveMapDetailsPref(next);
+              return next;
+            });
+          }}
+          className={`w-7 h-7 rounded-lg shadow border flex items-center justify-center active:scale-95 transition-transform ${
+            !offlineMapReady
+              ? 'bg-zinc-400/80 text-zinc-200 border-zinc-300 opacity-50'
+              : mapDetails
+              ? 'bg-emerald-600 text-white border-emerald-400'
+              : 'bg-white/95 text-zinc-800 border-zinc-300'
+          }`}
+          title={
+            offlineMapReady
+              ? mapDetails
+                ? 'Map details on (denser labels/POIs)'
+                : 'Map details off'
+              : 'Details need an offline country map'
+          }
+        >
+          <Layers className="w-3.5 h-3.5" />
+        </button>
+        <span className="text-[6px] font-sports font-bold px-1 py-px rounded bg-zinc-900/90 text-white border border-white/40 uppercase leading-none">
+          {mapDetails && offlineMapReady ? 'DET' : 'MIN'}
+        </span>
+
         <button
           onClick={handleToggleHeadingUp}
           className="relative w-7 h-7 rounded-lg bg-zinc-900/95 shadow border border-zinc-300 flex items-center justify-center active:scale-95 transition-transform"

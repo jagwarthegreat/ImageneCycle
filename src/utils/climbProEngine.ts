@@ -37,8 +37,13 @@ export function generateProfileSlices(points: RoutePoint[]): ProfileSlice[] {
   if (points.length < 2) return [];
 
   const slices: ProfileSlice[] = [];
-  const stepDist = 80; // Group into 80-meter segments for clean visual bars
-  
+  const totalLength = Math.max(
+    1,
+    points[points.length - 1].distFromStart - points[0].distFromStart
+  );
+  // ~40 slices across the course; denser on short rides, capped on long ones
+  const stepDist = Math.min(80, Math.max(25, totalLength / 40));
+
   let currentStart = points[0];
   let accumulatedDist = 0;
 

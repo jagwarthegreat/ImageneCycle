@@ -25,6 +25,7 @@ export interface GpsTrackingOptions {
 }
 
 import { correctEllipsoidalAltitude } from './elevationService';
+import { smoothedGradeFromHistory } from './smoothedGrade';
 
 export function haversineDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000; // Earth radius in meters
@@ -367,20 +368,17 @@ class GpsService {
     }
 
     this.altitudeHistory.push({ alt, dist: this.accumulatedDistMeters });
-    if (this.altitudeHistory.length > 8) {
+    // Keep ~2× smoothing window of path so 50 m grade has enough samples
+    const maxSpanM = 100;
+    while (
+      this.altitudeHistory.length > 40 ||
+      (this.altitudeHistory.length > 2 &&
+        this.accumulatedDistMeters - this.altitudeHistory[0].dist > maxSpanM)
+    ) {
       this.altitudeHistory.shift();
     }
 
-    let instantGrade = 0;
-    if (this.altitudeHistory.length >= 2) {
-      const oldest = this.altitudeHistory[0];
-      const spanDist = this.accumulatedDistMeters - oldest.dist;
-      const spanEle = alt - oldest.alt;
-      if (spanDist >= 8) {
-        instantGrade = (spanEle / spanDist) * 100;
-        instantGrade = Math.max(-25, Math.min(30, instantGrade));
-      }
-    }
+    const instantGrade = smoothedGradeFromHistory(this.altitudeHistory);
 
     const vam = this.updateSlidingVam(alt, now);
     const quality = accuracyToQuality(acc);

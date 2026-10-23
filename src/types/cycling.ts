@@ -86,6 +86,8 @@ export interface BreadcrumbPoint {
   cadence?: number | null;
   heartRate?: number | null;
   distance?: number;
+  /** Ambient temp °C for GPX gpxtpx:atemp */
+  temperature?: number;
 }
 
 export interface ActiveRideSession {

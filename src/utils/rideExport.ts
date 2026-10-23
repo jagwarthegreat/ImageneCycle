@@ -16,6 +16,7 @@ export interface BreadcrumbPoint {
   cadence?: number | null; // rpm
   heartRate?: number | null; // bpm
   distance?: number; // meters
+  temperature?: number; // °C → gpxtpx:atemp
 }
 
 export interface ExportableRideData {
@@ -516,13 +517,22 @@ export function buildGpxXml(ride: ExportableRideData): string {
       const hr = pt.heartRate ?? ride.avgHeartRateBpm;
       const cad = pt.cadence ?? ride.avgCadenceRpm;
       const pwr = pt.power ?? ride.avgPowerWatts;
+      const atemp = pt.temperature;
+      const speedMs =
+        pt.speed !== undefined && Number.isFinite(pt.speed) ? pt.speed / 3.6 : undefined;
 
-      if (hr || cad || pwr) {
+      if (hr || cad || pwr || atemp !== undefined || speedMs !== undefined) {
         let tpxInner = '';
-        if (hr) tpxInner += `<gpxtpx:hr>${Math.round(hr)}</gpxtpx:hr>`;
-        if (cad) tpxInner += `<gpxtpx:cad>${Math.round(cad)}</gpxtpx:cad>`;
+        if (hr) tpxInner += `<gpxtpx:hr>${Math.round(Number(hr))}</gpxtpx:hr>`;
+        if (cad) tpxInner += `<gpxtpx:cad>${Math.round(Number(cad))}</gpxtpx:cad>`;
+        if (atemp !== undefined && Number.isFinite(atemp)) {
+          tpxInner += `<gpxtpx:atemp>${Number(atemp).toFixed(1)}</gpxtpx:atemp>`;
+        }
+        if (speedMs !== undefined) {
+          tpxInner += `<gpxtpx:speed>${speedMs.toFixed(3)}</gpxtpx:speed>`;
+        }
         extXml = `\n        <extensions>`;
-        if (pwr) extXml += `<power>${Math.round(pwr)}</power>`;
+        if (pwr) extXml += `<power>${Math.round(Number(pwr))}</power>`;
         if (tpxInner) extXml += `<gpxtpx:TrackPointExtension>${tpxInner}</gpxtpx:TrackPointExtension>`;
         extXml += `</extensions>`;
       }

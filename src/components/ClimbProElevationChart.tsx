@@ -1,6 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, useState, useCallback } from 'react';
 import { ClimbSegment, RoutePoint } from '../types/cycling';
 import { generateProfileSlices, getGradeColor } from '../utils/climbProEngine';
+import { elevationAtDistance, smoothedGradeAtDistance } from '../utils/smoothedGrade';
 
 interface ClimbProElevationChartProps {
   climb: ClimbSegment | null;
@@ -36,6 +37,81 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
   const profilePoints = useRouteProfile ? routePoints : climb?.points || [];
   const isRouteMode = useRouteProfile;
 
+  const chartBoxRef = useRef<HTMLDivElement>(null);
+  const [scrubAbsDist, setScrubAbsDist] = useState<number | null>(null);
+  const draggingRef = useRef(false);
+
+  const climbStart =
+    profilePoints.length >= 2
+      ? isRouteMode
+        ? profilePoints[0].distFromStart
+        : (climb as ClimbSegment).startDist
+      : 0;
+  const climbEnd =
+    profilePoints.length >= 2
+      ? isRouteMode
+        ? profilePoints[profilePoints.length - 1].distFromStart
+        : (climb as ClimbSegment).endDist
+      : 0;
+  const climbLength = Math.max(1, climbEnd - climbStart);
+
+  const pointerToAbsDist = useCallback(
+    (clientX: number) => {
+      const el = chartBoxRef.current;
+      if (!el) return climbStart;
+      const rect = el.getBoundingClientRect();
+      const xRatio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+      return climbStart + xRatio * climbLength;
+    },
+    [climbStart, climbLength]
+  );
+
+  const slices = useMemo(() => {
+    if (profilePoints.length < 2) return [];
+    if (climb?.profileSlices?.length && !isRouteMode) return climb.profileSlices;
+    return generateProfileSlices(profilePoints);
+  }, [climb, isRouteMode, profilePoints]);
+
+  const minEle = profilePoints.length ? Math.min(...profilePoints.map(p => p.ele)) : 0;
+  const maxEle = profilePoints.length ? Math.max(...profilePoints.map(p => p.ele)) : 0;
+  const eleSpan = Math.max(10, maxEle - minEle);
+
+  const segments = useMemo(() => {
+    if (profilePoints.length < 2) return [];
+    if (slices.length > 0) {
+      return slices.map(sl => {
+        const x1 = distToX((sl.distStart - climbStart) / climbLength);
+        const x2 = distToX((sl.distEnd - climbStart) / climbLength);
+        const y1 = CHART_BOTTOM - ((sl.eleStart - minEle) / eleSpan) * CHART_HEIGHT;
+        const y2 = CHART_BOTTOM - ((sl.eleEnd - minEle) / eleSpan) * CHART_HEIGHT;
+        return {
+          x1,
+          x2: Math.max(x1 + 0.5, x2),
+          y1,
+          y2,
+          color: sl.color || getGradeColor(sl.grade),
+          grade: sl.grade
+        };
+      });
+    }
+
+    const pts = profilePoints;
+    const blocks: { x1: number; x2: number; y1: number; y2: number; color: string; grade: number }[] = [];
+    const stepSize = Math.max(1, Math.floor(pts.length / 40));
+    for (let i = 0; i < pts.length - 1; i += stepSize) {
+      const p1 = pts[i];
+      const p2 = pts[Math.min(pts.length - 1, i + stepSize)];
+      const x1 = distToX((p1.distFromStart - climbStart) / climbLength);
+      const x2 = distToX((p2.distFromStart - climbStart) / climbLength);
+      const y1 = CHART_BOTTOM - ((p1.ele - minEle) / eleSpan) * CHART_HEIGHT;
+      const y2 = CHART_BOTTOM - ((p2.ele - minEle) / eleSpan) * CHART_HEIGHT;
+      const dDist = Math.max(1, p2.distFromStart - p1.distFromStart);
+      const grade = ((p2.ele - p1.ele) / dDist) * 100;
+      blocks.push({ x1, x2, y1, y2, color: getGradeColor(grade), grade });
+    }
+    return blocks;
+  }, [slices, profilePoints, climbStart, climbLength, minEle, eleSpan]);
+
   if (profilePoints.length < 2) {
     return (
       <div className={`w-full flex flex-col justify-between px-3 py-2 select-none ${isDarkMode ? 'bg-zinc-950 text-zinc-400' : 'bg-white text-zinc-500'}`}>
@@ -54,73 +130,20 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
     );
   }
 
-  const climbStart = isRouteMode ? profilePoints[0].distFromStart : (climb as ClimbSegment).startDist;
-  const climbEnd = isRouteMode
-    ? profilePoints[profilePoints.length - 1].distFromStart
-    : (climb as ClimbSegment).endDist;
-  const climbLength = Math.max(1, climbEnd - climbStart);
   const relativeDist = Math.max(0, Math.min(climbLength, currentDist - climbStart));
   const progressRatio = relativeDist / climbLength;
 
-  const minEle = Math.min(...profilePoints.map(p => p.ele));
-  const maxEle = Math.max(...profilePoints.map(p => p.ele));
-  const eleSpan = Math.max(10, maxEle - minEle);
-
-  const slices = useMemo(() => {
-    if (climb?.profileSlices?.length && !isRouteMode) return climb.profileSlices;
-    return generateProfileSlices(profilePoints);
-  }, [climb, isRouteMode, profilePoints]);
-
-  const segments = useMemo(() => {
-    if (slices.length > 0) {
-      return slices.map(sl => {
-        const x1 = distToX((sl.distStart - climbStart) / climbLength);
-        const x2 = distToX((sl.distEnd - climbStart) / climbLength);
-        const y1 = CHART_BOTTOM - ((sl.eleStart - minEle) / eleSpan) * CHART_HEIGHT;
-        const y2 = CHART_BOTTOM - ((sl.eleEnd - minEle) / eleSpan) * CHART_HEIGHT;
-        return {
-          x1,
-          x2: Math.max(x1 + 0.5, x2),
-          y1,
-          y2,
-          color: sl.color || getGradeColor(sl.grade),
-          grade: sl.grade
-        };
-      });
-    }
-
-    // Fallback: dense trapezoids from points
-    const pts = profilePoints;
-    const blocks: { x1: number; x2: number; y1: number; y2: number; color: string; grade: number }[] = [];
-    const stepSize = Math.max(1, Math.floor(pts.length / 40));
-    for (let i = 0; i < pts.length - 1; i += stepSize) {
-      const p1 = pts[i];
-      const p2 = pts[Math.min(pts.length - 1, i + stepSize)];
-      const x1 = distToX((p1.distFromStart - climbStart) / climbLength);
-      const x2 = distToX((p2.distFromStart - climbStart) / climbLength);
-      const y1 = CHART_BOTTOM - ((p1.ele - minEle) / eleSpan) * CHART_HEIGHT;
-      const y2 = CHART_BOTTOM - ((p2.ele - minEle) / eleSpan) * CHART_HEIGHT;
-      const dDist = Math.max(1, p2.distFromStart - p1.distFromStart);
-      const grade = ((p2.ele - p1.ele) / dDist) * 100;
-      blocks.push({ x1, x2, y1, y2, color: getGradeColor(grade), grade });
-    }
-    return blocks;
-  }, [slices, profilePoints, climbStart, climbLength, minEle, eleSpan]);
-
   const riderX = distToX(progressRatio);
   const gridYs = [0, 0.25, 0.5, 0.75, 1].map(t => CHART_TOP + t * CHART_HEIGHT);
-  // Single X for pill, line, play — plot-aligned so they stay stacked
   const scrubberLeftPct = Math.max(
     2,
     Math.min(98, ((PAD_X + progressRatio * PLOT_WIDTH) / WIDTH) * 100)
   );
 
-  // Choice C: profile segment grade under rider; else GPS instant
   const profileGradeAtRider = (() => {
     if (segments.length === 0) return null;
     const hit = segments.find(seg => riderX >= seg.x1 && riderX <= seg.x2);
     if (hit) return hit.grade;
-    // Closest segment if between gaps
     let best = segments[0];
     let bestDist = Math.abs(riderX - (best.x1 + best.x2) / 2);
     for (const seg of segments) {
@@ -135,6 +158,15 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
   })();
   const pillGrade = profileGradeAtRider !== null ? profileGradeAtRider : currentGrade;
 
+  const isScrubbing = scrubAbsDist !== null;
+  const scrubRatio = isScrubbing
+    ? Math.max(0, Math.min(1, (scrubAbsDist! - climbStart) / climbLength))
+    : 0;
+  const scrubLeftPct = Math.max(2, Math.min(98, ((PAD_X + scrubRatio * PLOT_WIDTH) / WIDTH) * 100));
+  const scrubGrade = isScrubbing ? smoothedGradeAtDistance(profilePoints, scrubAbsDist!) : 0;
+  const scrubEle = isScrubbing ? elevationAtDistance(profilePoints, scrubAbsDist!) : 0;
+  const scrubDistKm = isScrubbing ? scrubAbsDist! / 1000 : 0;
+
   return (
     <div className={`w-full select-none flex flex-col ${isDarkMode ? 'bg-zinc-950 text-white' : 'bg-white text-zinc-900'}`}>
       {isRouteMode && (
@@ -145,13 +177,36 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
       )}
 
       <div className="px-3 pt-1">
-        {/* Chart + progress share one relative box so scrubber spans both */}
-        <div className="relative w-full">
+        <div
+          ref={chartBoxRef}
+          className="relative w-full touch-none cursor-crosshair"
+          onPointerDown={e => {
+            draggingRef.current = true;
+            (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+            setScrubAbsDist(pointerToAbsDist(e.clientX));
+          }}
+          onPointerMove={e => {
+            if (e.pointerType === 'mouse' || draggingRef.current || e.buttons > 0) {
+              setScrubAbsDist(pointerToAbsDist(e.clientX));
+            }
+          }}
+          onPointerUp={() => {
+            draggingRef.current = false;
+            setScrubAbsDist(null);
+          }}
+          onPointerCancel={() => {
+            draggingRef.current = false;
+            setScrubAbsDist(null);
+          }}
+          onPointerLeave={() => {
+            if (!draggingRef.current) setScrubAbsDist(null);
+          }}
+        >
           <div className="w-full h-[96px]">
             <svg
               viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
               preserveAspectRatio="none"
-              className="w-full h-full block"
+              className="w-full h-full block pointer-events-none"
             >
               {gridYs.map((y, i) => (
                 <line
@@ -185,30 +240,59 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
                   fill={isDarkMode ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.5)'}
                 />
               )}
+
+              {isScrubbing && (
+                <line
+                  x1={distToX(scrubRatio)}
+                  y1={CHART_TOP}
+                  x2={distToX(scrubRatio)}
+                  y2={CHART_BOTTOM}
+                  stroke={isDarkMode ? '#fafafa' : '#18181b'}
+                  strokeWidth="1.5"
+                />
+              )}
             </svg>
           </div>
 
-          <div className="relative w-full h-3.5 bg-blue-100">
+          <div className="relative w-full h-3.5 bg-blue-100 pointer-events-none">
             <div
               className="absolute inset-y-0 left-0 bg-blue-500 transition-all duration-150"
               style={{ width: `${scrubberLeftPct}%` }}
             />
           </div>
 
-          {/* Intact scrubber: pill → line → play */}
-          <div
-            className="absolute top-0 bottom-0 z-10 pointer-events-none -translate-x-1/2 flex flex-col items-center"
-            style={{ left: `${scrubberLeftPct}%` }}
-          >
-            <div className="bg-blue-500 text-white font-digital font-bold text-[13px] px-2.5 py-0.5 rounded shadow-md leading-none whitespace-nowrap shrink-0 mt-0.5">
-              {pillGrade.toFixed(1)}%
+          {!isScrubbing && (
+            <div
+              className="absolute top-0 bottom-0 z-10 pointer-events-none -translate-x-1/2 flex flex-col items-center"
+              style={{ left: `${scrubberLeftPct}%` }}
+            >
+              <div className="bg-blue-500 text-white font-digital font-bold text-[13px] px-2.5 py-0.5 rounded shadow-md leading-none whitespace-nowrap shrink-0 mt-0.5">
+                {pillGrade.toFixed(1)}%
+              </div>
+              <div className="w-0 h-0 border-x-[5px] border-x-transparent border-t-[5px] border-t-blue-500 shrink-0" />
+              <div className="w-0.5 flex-1 min-h-0 bg-blue-500" />
+              <div className="w-4 h-4 rounded-sm bg-blue-600 flex items-center justify-center shadow-sm shrink-0 -mt-px mb-0">
+                <span className="text-white text-[9px] font-bold leading-none translate-x-px">▶</span>
+              </div>
             </div>
-            <div className="w-0 h-0 border-x-[5px] border-x-transparent border-t-[5px] border-t-blue-500 shrink-0" />
-            <div className="w-0.5 flex-1 min-h-0 bg-blue-500" />
-            <div className="w-4 h-4 rounded-sm bg-blue-600 flex items-center justify-center shadow-sm shrink-0 -mt-px mb-0">
-              <span className="text-white text-[9px] font-bold leading-none translate-x-px">▶</span>
+          )}
+
+          {isScrubbing && (
+            <div
+              className="absolute top-1 z-20 pointer-events-none -translate-x-1/2"
+              style={{ left: `${scrubLeftPct}%` }}
+            >
+              <div
+                className={`text-[11px] font-digital font-bold px-2 py-1 rounded shadow-md whitespace-nowrap leading-tight ${
+                  isDarkMode ? 'bg-zinc-100 text-zinc-900' : 'bg-zinc-900 text-white'
+                }`}
+              >
+                <div>{scrubDistKm.toFixed(1)} km</div>
+                <div>{Math.round(scrubEle)} m</div>
+                <div>{scrubGrade.toFixed(1)}%</div>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
 

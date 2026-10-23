@@ -222,7 +222,14 @@ export default function App() {
   });
 
   // Map Navigation Settings (Auto-Center & 180° Heading Invert)
-  const [autoCenter, setAutoCenter] = useState<boolean>(true);
+  const [autoCenter, setAutoCenter] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    try {
+      return localStorage.getItem('magene-auto-center') !== 'false';
+    } catch {
+      return true;
+    }
+  });
   const [invertHeading, setInvertHeading] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -232,12 +239,22 @@ export default function App() {
     }
   });
 
+  const persistAutoCenter = (next: boolean, beep = false) => {
+    setAutoCenter(next);
+    try {
+      localStorage.setItem('magene-auto-center', String(next));
+    } catch {
+      /* ignore */
+    }
+    if (beep) bikeBeeper.beep(next ? 2600 : 1800, 0.05);
+  };
+
   const handleToggleAutoCenter = () => {
-    setAutoCenter(prev => {
-      const next = !prev;
-      bikeBeeper.beep(next ? 2600 : 1800, 0.05);
-      return next;
-    });
+    persistAutoCenter(!autoCenter, true);
+  };
+
+  const handleAutoCenterChange = (enabled: boolean) => {
+    persistAutoCenter(enabled, false);
   };
 
   const handleToggleInvertHeading = () => {
@@ -361,6 +378,8 @@ export default function App() {
   cadenceRef.current = cadence;
   const heartRateRef = useRef<number | null>(heartRate);
   heartRateRef.current = heartRate;
+  const weatherRef = useRef<WeatherData | null>(weather);
+  weatherRef.current = weather;
   const totalAscentRef = useRef<number>(totalAscent);
   totalAscentRef.current = totalAscent;
   const autoResumeOrStartRef = useRef<() => void>(() => {});
@@ -616,7 +635,8 @@ export default function App() {
             power: powerRef.current ?? undefined,
             cadence: cadenceRef.current ?? undefined,
             heartRate: heartRateRef.current ?? undefined,
-            distance: nextDist
+            distance: nextDist,
+            temperature: weatherRef.current?.tempC
           };
 
           if (sessionBufferRef.current && sessionBufferRef.current.id === curSessionId) {
@@ -1233,7 +1253,7 @@ export default function App() {
 
   // Center map on real current location and close drawer
   const handleLocateMe = () => {
-    setAutoCenter(true);
+    persistAutoCenter(true, false);
     if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -1364,6 +1384,11 @@ export default function App() {
           climbState={climbState}
           currentPoint={currentPoint}
           routePoints={activeRoute ? activeRoute.points : []}
+          climbProfilePoints={
+            activeRoute?.points?.length
+              ? activeRoute.points
+              : freeRideClimbRecorder.getSamples()
+          }
           routeTurns={activeRoute?.turns || []}
           routeName={activeRoute?.name}
           bleStatus={bleStatus}
@@ -1389,6 +1414,7 @@ export default function App() {
           basemapToken={basemapToken}
           autoCenter={autoCenter}
           onToggleAutoCenter={handleToggleAutoCenter}
+          onAutoCenterChange={handleAutoCenterChange}
           invertHeading={invertHeading}
           onToggleInvertHeading={handleToggleInvertHeading}
         />

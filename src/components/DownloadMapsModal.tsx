@@ -13,7 +13,8 @@ import {
   packCenter,
   haversineKm,
   mntBadges,
-  isRemotePackHosted
+  isPackSourceAvailable,
+  isLayerBundled
 } from '../utils/mapPacks';
 import { clearOfflineMapProbeCache } from '../utils/offlineMap';
 
@@ -42,7 +43,7 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  /** packId → whether remote Map (M) PMTiles is hostable */
+  /** packId → whether Map (M) source is installable (bundled asset or remote) */
   const [mapHosted, setMapHosted] = useState<Record<string, boolean | null>>({});
 
   const refresh = useCallback(async () => {
@@ -56,7 +57,7 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
       await Promise.all(
         list.map(async p => {
           const url = p.layers.map?.url;
-          hosted[p.id] = url ? await isRemotePackHosted(url) : false;
+          hosted[p.id] = url ? await isPackSourceAvailable(url) : false;
         })
       );
       setMapHosted(hosted);
@@ -176,8 +177,8 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
         </div>
 
         <p className="px-4 pt-2 text-[10px] text-zinc-500 font-sports leading-relaxed">
-          OpenStreetMap country packs (M = map, N = routing assist, T = topo). Nothing ships in the app —
-          download to this phone for offline use. Guru Maps .vm / .rt / .elv are not supported.
+          OpenStreetMap packs (M = map, N = routing, T = topo). Install to this phone for offline rides.
+          Philippines map can install from the app bundle when included. Guru .vm / .rt / .elv are not supported.
         </p>
 
         {error && (
@@ -237,6 +238,7 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
                         const busy = busyKey === key;
                         const remoteOk = layer === 'map' ? mapHosted[pack.id] : true;
                         const notHosted = layer === 'map' && !isInst && remoteOk === false;
+                        const bundled = isLayerBundled(pack, layer);
 
                         return (
                           <div
@@ -247,11 +249,13 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
                               <div className="text-xs font-sports font-bold text-zinc-200">{spec.label}</div>
                               <div className="text-[10px] text-zinc-500">
                                 {notHosted
-                                  ? 'Not hosted — run npm run maps:ph on the server'
-                                  : spec.note
-                                  ? spec.note
+                                  ? 'Not in this build — cloud packs later'
                                   : isInst
                                   ? 'On this device'
+                                  : bundled && layer === 'map' && remoteOk
+                                  ? `In app — install (${spec.bytes ? formatBytes(spec.bytes) : 'large'})`
+                                  : spec.note
+                                  ? spec.note
                                   : spec.bytes
                                   ? formatBytes(spec.bytes)
                                   : '—'}
