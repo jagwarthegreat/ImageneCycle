@@ -2,7 +2,7 @@
  * Encode start→destination via OSRM bike routing (geometry + turn-by-turn),
  * fetch elevations (Open-Meteo), build RoutePoint grades + ClimbPro climbs.
  */
-import { RouteData, RoutePoint, RouteTurn } from '../types/cycling';
+import { RouteAlternative, RouteData, RoutePoint, RouteTurn } from '../types/cycling';
 import { detectClimbsFromPoints } from './climbProEngine';
 import { haversineDistanceMeters, calculateBearingDegrees } from './gpsService';
 
@@ -14,6 +14,11 @@ export interface LatLng {
 export interface OsrmRouteResult {
   coords: LatLng[];
   turns: RouteTurn[];
+}
+
+export interface OsrmMultiRouteResult {
+  primary: OsrmRouteResult;
+  alternatives: OsrmRouteResult[];
 }
 
 const OSRM_BASE = 'https://router.project-osrm.org/route/v1/bike';
@@ -123,25 +128,26 @@ export function formatOsrmInstruction(
   }
 }
 
-function parseOsrmTurns(data: {
-  routes?: Array<{
-    legs?: Array<{
-      steps?: Array<{
-        distance?: number;
-        name?: string;
-        maneuver?: {
-          type?: string;
-          modifier?: string;
-          location?: [number, number];
-        };
-      }>;
+type OsrmRouteJson = {
+  geometry?: { coordinates?: [number, number][] };
+  legs?: Array<{
+    steps?: Array<{
+      distance?: number;
+      name?: string;
+      maneuver?: {
+        type?: string;
+        modifier?: string;
+        location?: [number, number];
+      };
     }>;
   }>;
-}): RouteTurn[] {
+};
+
+function parseOsrmTurnsFromRoute(route: OsrmRouteJson | undefined): RouteTurn[] {
   const turns: RouteTurn[] = [];
   let cumulative = 0;
   let index = 0;
-  const legs = data.routes?.[0]?.legs || [];
+  const legs = route?.legs || [];
 
   for (const leg of legs) {
     for (const step of leg.steps || []) {
@@ -173,25 +179,49 @@ function parseOsrmTurns(data: {
   return turns;
 }
 
-export async function fetchOsrmBikeRoute(waypoints: LatLng[]): Promise<OsrmRouteResult | null> {
+function osrmRouteToResult(route: OsrmRouteJson): OsrmRouteResult | null {
+  const raw = route.geometry?.coordinates;
+  if (!raw || raw.length < 2) return null;
+  const coords: LatLng[] = raw.map(c => ({ lng: c[0], lat: c[1] }));
+  return {
+    coords: densifyPolyline(coords),
+    turns: parseOsrmTurnsFromRoute(route)
+  };
+}
+
+/** Fetch primary bike route + OSRM alternatives (all with steps for offline TBT). */
+export async function fetchOsrmBikeRouteWithAlternatives(
+  waypoints: LatLng[]
+): Promise<OsrmMultiRouteResult | null> {
   if (waypoints.length < 2) return null;
   const path = waypoints.map(w => `${w.lng},${w.lat}`).join(';');
-  const url = `${OSRM_BASE}/${path}?overview=full&geometries=geojson&steps=true&annotations=false`;
+  const url = `${OSRM_BASE}/${path}?overview=full&geometries=geojson&steps=true&annotations=false&alternatives=true`;
 
   try {
     const res = await fetch(url);
     if (!res.ok) return null;
     const data = await res.json();
-    if (data.code !== 'Ok' || !data.routes?.[0]?.geometry?.coordinates) return null;
+    if (data.code !== 'Ok' || !data.routes?.length) return null;
 
-    const coords: LatLng[] = data.routes[0].geometry.coordinates.map(
-      (c: [number, number]) => ({ lng: c[0], lat: c[1] })
-    );
-    const turns = parseOsrmTurns(data);
-    return { coords: densifyPolyline(coords), turns };
+    const routes = data.routes as OsrmRouteJson[];
+    const primary = osrmRouteToResult(routes[0]);
+    if (!primary) return null;
+
+    const alternatives: OsrmRouteResult[] = [];
+    for (let i = 1; i < routes.length; i++) {
+      const alt = osrmRouteToResult(routes[i]);
+      if (alt && alt.coords.length >= 2) alternatives.push(alt);
+    }
+
+    return { primary, alternatives };
   } catch {
     return null;
   }
+}
+
+export async function fetchOsrmBikeRoute(waypoints: LatLng[]): Promise<OsrmRouteResult | null> {
+  const multi = await fetchOsrmBikeRouteWithAlternatives(waypoints);
+  return multi?.primary ?? null;
 }
 
 export async function fetchElevations(coords: LatLng[]): Promise<number[]> {
@@ -257,7 +287,12 @@ export function buildRouteFromEncodedPath(
   name: string,
   coords: LatLng[],
   elevations: number[],
-  options?: { location?: string; id?: string; turns?: RouteTurn[] }
+  options?: {
+    location?: string;
+    id?: string;
+    turns?: RouteTurn[];
+    alternatives?: RouteAlternative[];
+  }
 ): RouteData {
   const points = buildRoutePointsFromCoords(coords, elevations);
   let totalElevationGain = 0;
@@ -279,6 +314,7 @@ export function buildRouteFromEncodedPath(
     points,
     climbs,
     turns: options?.turns || [],
+    alternatives: options?.alternatives?.length ? options.alternatives : undefined,
     startLat: first?.lat,
     startLng: first?.lng,
     endLat: last?.lat,
@@ -292,7 +328,8 @@ export function recomputeRouteFromPoints(route: RouteData, elevations: number[])
   return buildRouteFromEncodedPath(route.name, coords, elevations, {
     id: route.id,
     location: route.location,
-    turns: route.turns
+    turns: route.turns,
+    alternatives: route.alternatives
   });
 }
 
@@ -380,14 +417,16 @@ export async function evaluateRouteFromEndpoints(
     throw new Error('Connect to the internet to create a route (OSRM turn-by-turn + elevations). Saved routes still work offline.');
   }
 
-  const osrm = await fetchOsrmBikeRoute(waypoints);
+  const osrm = await fetchOsrmBikeRouteWithAlternatives(waypoints);
   let coords: LatLng[];
   let turns: RouteTurn[] = [];
   let usedOsrm = true;
+  let altResults: OsrmRouteResult[] = [];
 
-  if (osrm && osrm.coords.length >= 2) {
-    coords = osrm.coords;
-    turns = osrm.turns;
+  if (osrm && osrm.primary.coords.length >= 2) {
+    coords = osrm.primary.coords;
+    turns = osrm.primary.turns;
+    altResults = osrm.alternatives;
   } else {
     throw new Error('Could not reach OSRM routing. Check your connection and try again — turn-by-turn needs internet when creating a route.');
   }
@@ -398,6 +437,23 @@ export async function evaluateRouteFromEndpoints(
   } catch {
     throw new Error('Could not fetch elevations. Check your connection and try again.');
   }
-  const route = buildRouteFromEncodedPath(name, coords, elevations, { turns });
+
+  // Alternatives: geometry + TBT only (skip elev API to keep create fast / quota-friendly)
+  const alternatives: RouteAlternative[] = altResults.map((alt, i) => {
+    const zeros = new Array(alt.coords.length).fill(0);
+    const points = buildRoutePointsFromCoords(alt.coords, zeros);
+    const last = points[points.length - 1];
+    return {
+      id: `alt-${i + 1}`,
+      points,
+      turns: alt.turns,
+      totalDistance: last ? last.distFromStart : 0
+    };
+  });
+
+  const route = buildRouteFromEncodedPath(name, coords, elevations, {
+    turns,
+    alternatives
+  });
   return { route, usedOsrm };
 }

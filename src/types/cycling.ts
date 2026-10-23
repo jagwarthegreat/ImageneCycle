@@ -46,6 +46,14 @@ export interface RouteTurn {
   distFromRouteStart: number;
 }
 
+/** Pre-fetched OSRM alternate corridor (geometry + TBT) for offline off-route snap */
+export interface RouteAlternative {
+  id: string;
+  points: RoutePoint[];
+  turns: RouteTurn[];
+  totalDistance: number;
+}
+
 export interface RouteData {
   id: string;
   name: string;
@@ -55,6 +63,8 @@ export interface RouteData {
   points: RoutePoint[];
   climbs: ClimbSegment[];
   turns?: RouteTurn[];
+  /** Alternate OSRM routes saved at create-time for offline TBT snap */
+  alternatives?: RouteAlternative[];
   startLat?: number;
   startLng?: number;
   endLat?: number;

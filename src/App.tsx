@@ -8,7 +8,7 @@ import { gpsService, GpsFix, accuracyToQuality, FAST_GEO_OPTIONS } from './utils
 import { bikeBeeper } from './utils/audioAlerts';
 import { getPowerZoneInfo, getHeartRateZoneInfo, POWER_ZONES_CONFIG, HR_ZONES_CONFIG } from './utils/powerZones';
 import { loadRideHistory, saveRideToHistory, deleteRideFromHistory, clearRideHistory, loadActiveSession, saveActiveSession, clearActiveSession } from './utils/rideHistory';
-import { exportRideToFit, exportRideToGpx, exportRideToJson, openStravaUpload } from './utils/rideExport';
+import { exportRideToFit, exportRideToGpx, exportRideToJson, openStravaUpload, formatExportNotice } from './utils/rideExport';
 import { fetchLiveWeather, WeatherData } from './services/weatherService';
 import { captureStravaRedirectTokens, isStravaConnected, startStravaConnect, clearStravaTokens } from './utils/stravaAuth';
 import { loadUserRoutes, loadUserRoutesAsync, saveUserRoute, deleteUserRoute } from './utils/routeLibrary';
@@ -356,6 +356,7 @@ export default function App() {
   const [isSensorModalOpen, setIsSensorModalOpen] = useState<boolean>(false);
   const [isClimbModalOpen, setIsClimbModalOpen] = useState<boolean>(false);
   const [historyMapRideId, setHistoryMapRideId] = useState<string | null>(null);
+  const [historyExportNotice, setHistoryExportNotice] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isResumePrompt, setIsResumePrompt] = useState<boolean>(false);
@@ -1144,6 +1145,7 @@ export default function App() {
 
     saveRideToHistory({
       routeName: customTitle || activeSession?.routeName || activeRoute?.name || 'Free Ride (Live GPS)',
+      startedAt: activeSession?.startedAt,
       timeElapsed: finalMoving,
       ridingTimeSeconds: finalMoving,
       saddleTimeSeconds: finalSaddle,
@@ -1153,6 +1155,8 @@ export default function App() {
       maxSpeedKmh: metrics.maxSpeed,
       calories: metrics.calories,
       avgPowerWatts: power,
+      avgCadenceRpm: metrics.cadence,
+      avgHeartRateBpm: metrics.heartRate,
       breadcrumbs: liveBreadcrumbs
     });
 
@@ -1390,6 +1394,7 @@ export default function App() {
               : freeRideClimbRecorder.getSamples()
           }
           routeTurns={activeRoute?.turns || []}
+          routeAlternatives={activeRoute?.alternatives || []}
           routeName={activeRoute?.name}
           bleStatus={bleStatus}
           gpsStatus={gpsStatus}
@@ -1865,6 +1870,12 @@ export default function App() {
                     )}
                   </div>
 
+                  {historyExportNotice && (
+                    <div className="text-[10px] text-emerald-300 bg-emerald-950/40 border border-emerald-800/50 rounded-md px-2 py-1.5">
+                      {historyExportNotice}
+                    </div>
+                  )}
+
                   {rideHistory.length === 0 ? (
                     <div className="p-4 bg-zinc-850/50 rounded-xl text-center text-xs text-zinc-500">
                       <History className="w-6 h-6 mx-auto mb-1 text-zinc-600" />
@@ -1935,23 +1946,29 @@ export default function App() {
 
                             <div className="mt-2.5 pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-1 text-[10px]">
                               <button
-                                onClick={() => {
-                                  exportRideToFit({
-                                    routeName: ride.routeName,
-                                    startedAt: ride.startedAt || ride.timestamp,
-                                    timeElapsed: ride.timeElapsed,
-                                    ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
-                                    saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
-                                    distanceMeters: ride.distanceMeters,
-                                    totalAscentMeters: ride.totalAscentMeters,
-                                    avgSpeedKmh: ride.avgSpeedKmh,
-                                    maxSpeedKmh: ride.maxSpeedKmh,
-                                    calories: ride.calories,
-                                    avgPowerWatts: ride.avgPowerWatts,
-                                    avgCadenceRpm: ride.avgCadenceRpm,
-                                    avgHeartRateBpm: ride.avgHeartRateBpm,
-                                    breadcrumbs: ride.breadcrumbs || []
-                                  });
+                                onClick={async () => {
+                                  try {
+                                    const result = await exportRideToFit({
+                                      routeName: ride.routeName,
+                                      startedAt: ride.startedAt || ride.timestamp,
+                                      timeElapsed: ride.timeElapsed,
+                                      ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
+                                      saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
+                                      distanceMeters: ride.distanceMeters,
+                                      totalAscentMeters: ride.totalAscentMeters,
+                                      avgSpeedKmh: ride.avgSpeedKmh,
+                                      maxSpeedKmh: ride.maxSpeedKmh,
+                                      calories: ride.calories,
+                                      avgPowerWatts: ride.avgPowerWatts,
+                                      avgCadenceRpm: ride.avgCadenceRpm,
+                                      avgHeartRateBpm: ride.avgHeartRateBpm,
+                                      breadcrumbs: ride.breadcrumbs || []
+                                    });
+                                    setHistoryExportNotice(formatExportNotice(result, 'FIT'));
+                                  } catch (err) {
+                                    setHistoryExportNotice(err instanceof Error ? err.message : 'FIT export failed');
+                                  }
+                                  setTimeout(() => setHistoryExportNotice(null), 4000);
                                 }}
                                 className="flex-1 py-1 px-1 rounded-md bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-700/60 text-emerald-300 font-sports font-bold transition-colors flex items-center justify-center gap-0.5"
                                 title="Export standardized FIT 2.0 binary file (Strava/Garmin)"
@@ -1961,20 +1978,26 @@ export default function App() {
                               </button>
 
                               <button
-                                onClick={() => {
-                                  exportRideToGpx({
-                                    routeName: ride.routeName,
-                                    startedAt: ride.startedAt || ride.timestamp,
-                                    timeElapsed: ride.timeElapsed,
-                                    ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
-                                    saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
-                                    distanceMeters: ride.distanceMeters,
-                                    totalAscentMeters: ride.totalAscentMeters,
-                                    avgSpeedKmh: ride.avgSpeedKmh,
-                                    maxSpeedKmh: ride.maxSpeedKmh,
-                                    calories: ride.calories,
-                                    breadcrumbs: ride.breadcrumbs || []
-                                  });
+                                onClick={async () => {
+                                  try {
+                                    const result = await exportRideToGpx({
+                                      routeName: ride.routeName,
+                                      startedAt: ride.startedAt || ride.timestamp,
+                                      timeElapsed: ride.timeElapsed,
+                                      ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
+                                      saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
+                                      distanceMeters: ride.distanceMeters,
+                                      totalAscentMeters: ride.totalAscentMeters,
+                                      avgSpeedKmh: ride.avgSpeedKmh,
+                                      maxSpeedKmh: ride.maxSpeedKmh,
+                                      calories: ride.calories,
+                                      breadcrumbs: ride.breadcrumbs || []
+                                    });
+                                    setHistoryExportNotice(formatExportNotice(result, 'GPX'));
+                                  } catch (err) {
+                                    setHistoryExportNotice(err instanceof Error ? err.message : 'GPX export failed');
+                                  }
+                                  setTimeout(() => setHistoryExportNotice(null), 4000);
                                 }}
                                 className="flex-1 py-1 px-1 rounded-md bg-zinc-800 hover:bg-blue-900/50 hover:text-blue-300 border border-zinc-700 text-zinc-300 font-sports font-bold transition-colors flex items-center justify-center gap-0.5"
                                 title="Export Strava GPX 1.1 file"
@@ -1984,20 +2007,26 @@ export default function App() {
                               </button>
 
                               <button
-                                onClick={() => {
-                                  exportRideToJson({
-                                    routeName: ride.routeName,
-                                    startedAt: ride.startedAt || ride.timestamp,
-                                    timeElapsed: ride.timeElapsed,
-                                    ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
-                                    saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
-                                    distanceMeters: ride.distanceMeters,
-                                    totalAscentMeters: ride.totalAscentMeters,
-                                    avgSpeedKmh: ride.avgSpeedKmh,
-                                    maxSpeedKmh: ride.maxSpeedKmh,
-                                    calories: ride.calories,
-                                    breadcrumbs: ride.breadcrumbs || []
-                                  });
+                                onClick={async () => {
+                                  try {
+                                    const result = await exportRideToJson({
+                                      routeName: ride.routeName,
+                                      startedAt: ride.startedAt || ride.timestamp,
+                                      timeElapsed: ride.timeElapsed,
+                                      ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
+                                      saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
+                                      distanceMeters: ride.distanceMeters,
+                                      totalAscentMeters: ride.totalAscentMeters,
+                                      avgSpeedKmh: ride.avgSpeedKmh,
+                                      maxSpeedKmh: ride.maxSpeedKmh,
+                                      calories: ride.calories,
+                                      breadcrumbs: ride.breadcrumbs || []
+                                    });
+                                    setHistoryExportNotice(formatExportNotice(result, 'JSON'));
+                                  } catch (err) {
+                                    setHistoryExportNotice(err instanceof Error ? err.message : 'JSON export failed');
+                                  }
+                                  setTimeout(() => setHistoryExportNotice(null), 4000);
                                 }}
                                 className="flex-1 py-1 px-2 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-sports font-bold transition-colors flex items-center justify-center gap-1 border border-zinc-700"
                                 title="Export detailed JSON telemetry"

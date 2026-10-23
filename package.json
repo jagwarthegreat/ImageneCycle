@@ -19,6 +19,7 @@
     "@capacitor/android": "^8.5.3",
     "@capacitor/cli": "^8.5.3",
     "@capacitor/core": "^8.5.3",
+    "@capacitor/filesystem": "^8.1.5",
     "@capawesome-team/capacitor-android-foreground-service": "^8.1.0",
     "@google/genai": "^2.4.0",
     "@protomaps/basemaps": "^5.7.2",

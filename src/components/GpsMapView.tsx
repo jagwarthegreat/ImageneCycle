@@ -59,6 +59,8 @@ async function attachBasemap(
 interface GpsMapViewProps {
   currentPoint: RoutePoint;
   routePoints?: RoutePoint[];
+  /** Dashed overlay when TBT snapped to a pre-saved OSRM alternative */
+  activeAltPoints?: RoutePoint[];
   heading: number;
   isDarkMode?: boolean;
   liveBreadcrumbs?: { lat: number; lng: number }[];
@@ -79,6 +81,7 @@ interface GpsMapViewProps {
 export const GpsMapView: React.FC<GpsMapViewProps> = ({
   currentPoint,
   routePoints = [],
+  activeAltPoints,
   heading,
   isDarkMode = false,
   liveBreadcrumbs = [],
@@ -99,6 +102,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const polylineBorderRef = useRef<L.Polyline | null>(null);
   const polylineCoreRef = useRef<L.Polyline | null>(null);
   const breadcrumbPolylineRef = useRef<L.Polyline | null>(null);
+  const altPolylineRef = useRef<L.Polyline | null>(null);
   const chevronsRef = useRef<L.LayerGroup | null>(null);
   const endpointsRef = useRef<L.LayerGroup | null>(null);
   const tileLayerRef = useRef<L.Layer | null>(null);
@@ -159,7 +163,10 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     });
   };
 
-  const effectiveHeading = ((heading || 0) + (invertHeading ? 180 : 0)) % 360;
+  /** SVG tip faces "up"; device heading was landing opposite of travel — bake in +180. */
+  const ICON_HEADING_OFFSET_DEG = 180;
+  const effectiveHeading =
+    ((heading || 0) + ICON_HEADING_OFFSET_DEG + (invertHeading ? 180 : 0)) % 360;
   const rotateWrapperRef = useRef<HTMLDivElement>(null);
   const effectiveHeadingRef = useRef(effectiveHeading);
   effectiveHeadingRef.current = effectiveHeading;
@@ -230,6 +237,17 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         dashArray: '4 4'
       }).addTo(map);
       breadcrumbPolylineRef.current = breadcrumbPolyline;
+
+      // 3b. Active alternate corridor (when TBT snapped off primary)
+      const altPolyline = L.polyline([], {
+        color: '#2563eb',
+        weight: 4,
+        opacity: 0.85,
+        dashArray: '8 6',
+        lineCap: 'round',
+        lineJoin: 'round'
+      }).addTo(map);
+      altPolylineRef.current = altPolyline;
 
       // 4. Custom GPS Location Puck with Heading Arrow (ping disabled in battery saver)
       const pingHtml = batterySaverRef.current
@@ -422,6 +440,18 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       }
     }
   }, [routePoints, isDarkMode]);
+
+  // Dashed overlay for active pre-saved alternative TBT corridor
+  useEffect(() => {
+    if (!altPolylineRef.current) return;
+    if (activeAltPoints && activeAltPoints.length > 1) {
+      altPolylineRef.current.setLatLngs(
+        activeAltPoints.map(p => [p.lat, p.lng] as [number, number])
+      );
+    } else {
+      altPolylineRef.current.setLatLngs([]);
+    }
+  }, [activeAltPoints]);
 
   // Fit course when parent requests (route selected as current ride)
   useEffect(() => {

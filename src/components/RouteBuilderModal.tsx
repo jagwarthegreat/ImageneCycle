@@ -232,7 +232,13 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
             <>
               <div className="flex items-center justify-between">
                 <span className="font-bold text-emerald-400 uppercase text-[10px]">
-                  {usedOsrm ? 'OSRM bike route' : 'Straight-line fallback'}
+                  {usedOsrm
+                    ? `OSRM bike route${
+                        route.alternatives?.length
+                          ? ` + ${route.alternatives.length} alt TBT`
+                          : ''
+                      }`
+                    : 'Straight-line fallback'}
                 </span>
                 <button
                   type="button"

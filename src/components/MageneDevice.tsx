@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { GpsMapView } from './GpsMapView';
 import { ClimbProElevationChart } from './ClimbProElevationChart';
 import { WeatherBadge } from './WeatherBadge';
@@ -25,7 +25,7 @@ import {
   X
 } from 'lucide-react';
 
-import { RoutePoint, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert, RouteTurn } from '../types/cycling';
+import { RoutePoint, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert, RouteTurn, RouteAlternative } from '../types/cycling';
 import { WeatherData } from '../services/weatherService';
 import {
   getRouteRemainingDistanceMeters,
@@ -33,8 +33,20 @@ import {
   getRouteRemainingAvgGrade,
   getNextTurn
 } from '../utils/routeEncode';
+import {
+  BranchTracker,
+  PRIMARY_BRANCH_ID,
+  selectActiveRouteBranch
+} from '../utils/routeMatching';
 import { getRouteElevation } from '../utils/elevationService';
 import { calculateGpsSignalBars } from '../utils/gpsSignalBars';
+import {
+  cycleThemeMode,
+  loadThemeMode,
+  resolveIsDarkMode,
+  saveThemeMode,
+  ThemeMode
+} from '../utils/themePreference';
 
 interface MageneDeviceProps {
   metrics: RideMetrics;
@@ -44,6 +56,8 @@ interface MageneDeviceProps {
   /** Elevation / ClimbPro profile (planned route or free-ride samples). Falls back to routePoints. */
   climbProfilePoints?: RoutePoint[];
   routeTurns?: RouteTurn[];
+  /** Pre-saved OSRM alternatives for offline off-route TBT snap */
+  routeAlternatives?: RouteAlternative[];
   bleStatus: BleDeviceStatus;
   gpsStatus: GpsStatus;
   onPageChange?: (page: number) => void;
@@ -129,6 +143,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   routePoints = [],
   climbProfilePoints,
   routeTurns = [],
+  routeAlternatives = [],
   bleStatus,
   gpsStatus,
   onLap,
@@ -165,7 +180,17 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   const clock24hStr = formatClock24h(currentDate);
   const dateWithYearStr = formatDateWithYear(currentDate);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [isDarkMode, setIsDarkMode] = useState<boolean>(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => loadThemeMode());
+  const isDarkMode = resolveIsDarkMode(themeMode, currentDate);
+
+  const branchTrackerRef = useRef<BranchTracker>({
+    branchId: PRIMARY_BRANCH_ID,
+    offStreak: 0
+  });
+
+  useEffect(() => {
+    branchTrackerRef.current = { branchId: PRIMARY_BRANCH_ID, offStreak: 0 };
+  }, [routePoints, routeAlternatives]);
 
   // Format time MM:SS or HH:MM:SS
   const formatTime = (secs: number) => {
@@ -187,17 +212,56 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   };
 
   const hasActiveRoute = routePoints.length > 1;
+
+  const [navBranch, setNavBranch] = useState<ReturnType<typeof selectActiveRouteBranch> | null>(
+    null
+  );
+
+  useEffect(() => {
+    if (
+      !hasActiveRoute ||
+      !Number.isFinite(metrics.currentLat) ||
+      !Number.isFinite(metrics.currentLng) ||
+      (metrics.currentLat === 0 && metrics.currentLng === 0)
+    ) {
+      setNavBranch(null);
+      return;
+    }
+    const result = selectActiveRouteBranch(
+      { lat: metrics.currentLat, lng: metrics.currentLng },
+      routePoints,
+      routeTurns,
+      routeAlternatives,
+      branchTrackerRef.current
+    );
+    setNavBranch(result);
+  }, [
+    hasActiveRoute,
+    metrics.currentLat,
+    metrics.currentLng,
+    routePoints,
+    routeTurns,
+    routeAlternatives
+  ]);
+
+  const navPoints = navBranch?.points?.length ? navBranch.points : routePoints;
+  const navTurns = navBranch?.turns?.length ? navBranch.turns : routeTurns;
+  const distAlongRoute =
+    navBranch != null ? navBranch.distAlongRoute : metrics.distanceTraveled;
+  const activeAltPoints =
+    navBranch && navBranch.branchId !== PRIMARY_BRANCH_ID ? navBranch.points : undefined;
+
   const climbChartPoints =
     climbProfilePoints && climbProfilePoints.length > 1 ? climbProfilePoints : routePoints;
-  // Route-level remain (not climb-only) so 0-climb courses still show directions
+  // Route-level remain uses snap distance along active corridor
   const routeDistRemainM = hasActiveRoute
-    ? getRouteRemainingDistanceMeters(routePoints, metrics.distanceTraveled)
+    ? getRouteRemainingDistanceMeters(navPoints, distAlongRoute)
     : 0;
   const routeRemAscentM = hasActiveRoute
-    ? getRouteRemainingAscentMeters(routePoints, metrics.distanceTraveled)
+    ? getRouteRemainingAscentMeters(navPoints, distAlongRoute)
     : 0;
   const routeAvgGradeRem = hasActiveRoute
-    ? getRouteRemainingAvgGrade(routePoints, metrics.distanceTraveled)
+    ? getRouteRemainingAvgGrade(navPoints, distAlongRoute)
     : 0;
 
   const distRemainKm = hasActiveRoute
@@ -212,12 +276,18 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
       : climbState.avgGradeRemaining;
 
   const displayedElevation = (hasActiveRoute
-    ? getRouteElevation(routePoints, metrics.distanceTraveled, { lat: metrics.currentLat, lng: metrics.currentLng })
+    ? getRouteElevation(navPoints, distAlongRoute, { lat: metrics.currentLat, lng: metrics.currentLng })
     : null) ?? metrics.currentElevation;
 
-  const nextTurnCue = getNextTurn(routeTurns, metrics.distanceTraveled);
+  const nextTurnCue = getNextTurn(navTurns, distAlongRoute);
   const formatTurnDist = (m: number) =>
     m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${m} m`;
+
+  const handleCycleTheme = () => {
+    const next = cycleThemeMode(themeMode);
+    setThemeMode(next);
+    saveThemeMode(next);
+  };
 
   // 3-Bar GPS Signal Meter:
   // 3 bars: Strong strength (accuracy <= 2.5m or GPS 3D fallback)
@@ -363,11 +433,26 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
           />
 
           <button
-            onClick={() => setIsDarkMode(!isDarkMode)}
-            className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800 transition-colors"
-            title="Toggle Day/Night"
+            onClick={handleCycleTheme}
+            className="p-1 rounded hover:bg-zinc-200 dark:hover:bg-zinc-800 transition-colors relative"
+            title={`Theme: ${themeMode} (tap cycles auto → light → dark)`}
           >
-            {isDarkMode ? <Sun className="w-3.5 h-3.5 text-amber-400" /> : <Moon className="w-3.5 h-3.5 text-zinc-500" />}
+            {themeMode === 'auto' ? (
+              isDarkMode ? (
+                <Sun className="w-3.5 h-3.5 text-amber-400" />
+              ) : (
+                <Moon className="w-3.5 h-3.5 text-zinc-500" />
+              )
+            ) : isDarkMode ? (
+              <Sun className="w-3.5 h-3.5 text-amber-400" />
+            ) : (
+              <Moon className="w-3.5 h-3.5 text-zinc-500" />
+            )}
+            {themeMode === 'auto' && (
+              <span className="absolute -bottom-0.5 left-1/2 -translate-x-1/2 text-[6px] font-bold text-blue-500 leading-none">
+                A
+              </span>
+            )}
           </button>
 
           {/* Page Switcher moved to far right */}
@@ -501,6 +586,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
               <GpsMapView
                 currentPoint={currentPoint}
                 routePoints={routePoints}
+                activeAltPoints={activeAltPoints}
                 heading={metrics.currentHeading}
                 isDarkMode={isDarkMode}
                 liveBreadcrumbs={liveBreadcrumbs}
@@ -515,6 +601,16 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 invertHeading={invertHeading}
                 onToggleInvertHeading={onToggleInvertHeading}
               />
+              {navBranch?.offRoute && (
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[450] px-2 py-1 rounded-md bg-amber-500 text-black text-[9px] font-sports font-bold shadow">
+                  OFF COURSE
+                </div>
+              )}
+              {navBranch && !navBranch.offRoute && navBranch.branchId !== PRIMARY_BRANCH_ID && (
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[450] px-2 py-1 rounded-md bg-blue-600 text-white text-[9px] font-sports font-bold shadow">
+                  ALT ROUTE TBT
+                </div>
+              )}
               {/* Live next-turn cue (square, bottom-left) */}
               {nextTurnCue && (
                 <NextTurnSquare cue={nextTurnCue} formatDist={formatTurnDist} />
@@ -526,7 +622,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
               <ClimbProElevationChart
                 climb={climbState.currentClimb || climbState.nextClimb}
                 routePoints={climbChartPoints}
-                currentDist={metrics.distanceTraveled}
+                currentDist={distAlongRoute}
                 currentGrade={metrics.currentGrade}
                 avgGradeRemaining={profileAvgGrade}
                 isDarkMode={isDarkMode}
@@ -849,6 +945,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
               <GpsMapView
                 currentPoint={currentPoint}
                 routePoints={routePoints}
+                activeAltPoints={activeAltPoints}
                 heading={metrics.currentHeading}
                 isDarkMode={isDarkMode}
                 liveBreadcrumbs={liveBreadcrumbs}
@@ -863,6 +960,16 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 invertHeading={invertHeading}
                 onToggleInvertHeading={onToggleInvertHeading}
               />
+              {navBranch?.offRoute && (
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[450] px-2 py-1 rounded-md bg-amber-500 text-black text-[9px] font-sports font-bold shadow">
+                  OFF COURSE
+                </div>
+              )}
+              {navBranch && !navBranch.offRoute && navBranch.branchId !== PRIMARY_BRANCH_ID && (
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[450] px-2 py-1 rounded-md bg-blue-600 text-white text-[9px] font-sports font-bold shadow">
+                  ALT ROUTE TBT
+                </div>
+              )}
               {nextTurnCue && (
                 <NextTurnSquare cue={nextTurnCue} formatDist={formatTurnDist} />
               )}

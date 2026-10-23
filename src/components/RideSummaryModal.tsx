@@ -19,7 +19,7 @@ import {
   FileCode
 } from 'lucide-react';
 import { RideMetrics } from '../types/cycling';
-import { exportRideToFit, exportRideToGpx, exportRideToJson, openStravaUpload, uploadToStrava, rideToFitBlob, rideToGpxBlob, BreadcrumbPoint } from '../utils/rideExport';
+import { exportRideToFit, exportRideToGpx, exportRideToJson, openStravaUpload, uploadToStrava, rideToFitBlob, rideToGpxBlob, formatExportNotice, BreadcrumbPoint } from '../utils/rideExport';
 import { getValidStravaAccessToken, isStravaConnected, startStravaConnect, setManualStravaToken, getStoredStravaToken } from '../utils/stravaAuth';
 
 interface RideSummaryModalProps {
@@ -76,22 +76,34 @@ export const RideSummaryModal: React.FC<RideSummaryModalProps> = ({
     breadcrumbs
   });
 
-  const handleExportFit = () => {
-    exportRideToFit(buildExportPayload());
-    setExportNotice('Standard .FIT file with Power, HR & Cadence downloaded!');
-    setTimeout(() => setExportNotice(null), 3500);
+  const handleExportFit = async () => {
+    try {
+      const result = await exportRideToFit(buildExportPayload());
+      setExportNotice(formatExportNotice(result, 'FIT'));
+    } catch (err) {
+      setExportNotice(err instanceof Error ? err.message : 'FIT export failed');
+    }
+    setTimeout(() => setExportNotice(null), 4000);
   };
 
-  const handleExportGpx = () => {
-    exportRideToGpx(buildExportPayload());
-    setExportNotice('Strava-compatible GPX file downloaded!');
-    setTimeout(() => setExportNotice(null), 3500);
+  const handleExportGpx = async () => {
+    try {
+      const result = await exportRideToGpx(buildExportPayload());
+      setExportNotice(formatExportNotice(result, 'GPX'));
+    } catch (err) {
+      setExportNotice(err instanceof Error ? err.message : 'GPX export failed');
+    }
+    setTimeout(() => setExportNotice(null), 4000);
   };
 
-  const handleExportJson = () => {
-    exportRideToJson(buildExportPayload());
-    setExportNotice('Full telemetry JSON file downloaded!');
-    setTimeout(() => setExportNotice(null), 3500);
+  const handleExportJson = async () => {
+    try {
+      const result = await exportRideToJson(buildExportPayload());
+      setExportNotice(formatExportNotice(result, 'JSON'));
+    } catch (err) {
+      setExportNotice(err instanceof Error ? err.message : 'JSON export failed');
+    }
+    setTimeout(() => setExportNotice(null), 4000);
   };
 
   const executeStravaUpload = async (token: string, format: 'fit' | 'gpx') => {

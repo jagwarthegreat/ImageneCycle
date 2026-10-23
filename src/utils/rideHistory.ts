@@ -72,6 +72,7 @@ export function clearActiveSession(): void {
 
 export function saveRideToHistory(data: {
   routeName: string;
+  startedAt?: number;
   timeElapsed: number;
   ridingTimeSeconds?: number;
   saddleTimeSeconds?: number;
@@ -101,6 +102,7 @@ export function saveRideToHistory(data: {
     const newItem: RideHistoryItem = {
       id: `ride-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       timestamp: Date.now(),
+      startedAt: data.startedAt,
       dateFormatted,
       routeName: data.routeName || 'Road Ride',
       timeElapsed: data.timeElapsed,

@@ -6,6 +6,9 @@
  * Supports direct multipart/form-data upload to Strava API v3.
  */
 
+import { Capacitor } from '@capacitor/core';
+import { Directory, Filesystem } from '@capacitor/filesystem';
+
 export interface BreadcrumbPoint {
   lat: number;
   lng: number;
@@ -38,17 +41,28 @@ export interface ExportableRideData {
   breadcrumbs: BreadcrumbPoint[];
 }
 
-export function downloadFile(content: string, filename: string, mimeType: string) {
-  const blob = new Blob([content], { type: mimeType });
-  downloadBlob(blob, filename);
+export interface ExportSaveResult {
+  filename: string;
+  /** Relative path under Documents (native) or download filename (web) */
+  path: string;
+  uri?: string;
+  native: boolean;
 }
 
-export function downloadBinaryFile(data: Uint8Array, filename: string, mimeType = 'application/octet-stream') {
-  const blob = new Blob([data as unknown as BlobPart], { type: mimeType });
-  downloadBlob(blob, filename);
+const EXPORT_DIR = 'MageneCycle/Rides';
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const chunk = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
-function downloadBlob(blob: Blob, filename: string) {
+function downloadBlobWeb(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -58,7 +72,61 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, 200);
+  }, 1000);
+}
+
+/** Save export to phone Documents (native) or trigger browser download (web). */
+export async function saveExportBlob(blob: Blob, filename: string): Promise<ExportSaveResult> {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await Filesystem.mkdir({
+        path: EXPORT_DIR,
+        directory: Directory.Documents,
+        recursive: true
+      });
+    } catch {
+      // Directory may already exist
+    }
+
+    const path = `${EXPORT_DIR}/${filename}`;
+    const data = await blobToBase64(blob);
+    await Filesystem.writeFile({
+      path,
+      data,
+      directory: Directory.Documents
+    });
+
+    let uri: string | undefined;
+    try {
+      const got = await Filesystem.getUri({ path, directory: Directory.Documents });
+      uri = got.uri;
+    } catch {
+      /* optional */
+    }
+
+    return { filename, path, uri, native: true };
+  }
+
+  downloadBlobWeb(blob, filename);
+  return { filename, path: filename, native: false };
+}
+
+export async function downloadFile(
+  content: string,
+  filename: string,
+  mimeType: string
+): Promise<ExportSaveResult> {
+  const blob = new Blob([content], { type: mimeType });
+  return saveExportBlob(blob, filename);
+}
+
+export async function downloadBinaryFile(
+  data: Uint8Array,
+  filename: string,
+  mimeType = 'application/octet-stream'
+): Promise<ExportSaveResult> {
+  const blob = new Blob([data as unknown as BlobPart], { type: mimeType });
+  return saveExportBlob(blob, filename);
 }
 
 // ============================================================================
@@ -472,7 +540,7 @@ export function buildFitBinary(ride: ExportableRideData): Uint8Array {
 /**
  * Exports and downloads the ride as a standardized .FIT file
  */
-export function exportRideToFit(ride: ExportableRideData) {
+export async function exportRideToFit(ride: ExportableRideData): Promise<ExportSaveResult> {
   const fitBinary = buildFitBinary(ride);
   const cleanName = (ride.routeName || 'ride')
     .toLowerCase()
@@ -480,7 +548,7 @@ export function exportRideToFit(ride: ExportableRideData) {
     .replace(/_+/g, '_');
   const dateStr = new Date().toISOString().slice(0, 10);
   const filename = `magene_c706_${cleanName}_${dateStr}.fit`;
-  downloadBinaryFile(fitBinary, filename, 'application/vnd.ant.fit');
+  return downloadBinaryFile(fitBinary, filename, 'application/vnd.ant.fit');
 }
 
 /** Build a FIT Blob suitable for uploadToStrava */
@@ -573,7 +641,7 @@ ${trkptsXml}    </trkseg>
 /**
  * Exports and downloads the ride as a Strava-ready GPX file
  */
-export function exportRideToGpx(ride: ExportableRideData) {
+export async function exportRideToGpx(ride: ExportableRideData): Promise<ExportSaveResult> {
   const gpxContent = buildGpxXml(ride);
   const cleanName = (ride.routeName || 'ride')
     .toLowerCase()
@@ -581,13 +649,13 @@ export function exportRideToGpx(ride: ExportableRideData) {
     .replace(/_+/g, '_');
   const dateStr = new Date().toISOString().slice(0, 10);
   const filename = `magene_c706_${cleanName}_${dateStr}.gpx`;
-  downloadFile(gpxContent, filename, 'application/gpx+xml');
+  return downloadFile(gpxContent, filename, 'application/gpx+xml');
 }
 
 /**
  * Exports and downloads full JSON telemetry including speed, distance, elevation, and breadcrumbs
  */
-export function exportRideToJson(ride: ExportableRideData) {
+export async function exportRideToJson(ride: ExportableRideData): Promise<ExportSaveResult> {
   const payload = {
     device: 'ImageneCycle Cycling Computer',
     version: '2.0',
@@ -622,7 +690,14 @@ export function exportRideToJson(ride: ExportableRideData) {
     .replace(/_+/g, '_');
   const dateStr = new Date().toISOString().slice(0, 10);
   const filename = `magene_c706_${cleanName}_${dateStr}.json`;
-  downloadFile(jsonStr, filename, 'application/json');
+  return downloadFile(jsonStr, filename, 'application/json');
+}
+
+export function formatExportNotice(result: ExportSaveResult, label: string): string {
+  if (result.native) {
+    return `${label} saved to Documents/${result.path}`;
+  }
+  return `${label} downloaded (${result.filename})`;
 }
 
 /**
