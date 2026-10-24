@@ -21,10 +21,12 @@ import { ClimbManualInputModal } from './components/ClimbManualInputModal';
 import { RideSummaryModal } from './components/RideSummaryModal';
 import { HistoryRideMap } from './components/HistoryRideMap';
 import {
-  startRecordingNotification,
-  updateRecordingNotification,
-  stopRecordingNotification
+  stopRecordingNotification,
+  syncRecordingNotification,
+  bindRecordingNotificationActions
 } from './utils/recordingForeground';
+import { evaluateAutoPause, type AutoPauseState } from './utils/autoPause';
+import { ensureRideLocationPermissions, openRideLocationSettings } from './utils/locationPermissions';
 import { StartActivityPrompt } from './components/StartActivityPrompt';
 import { RouteBuilderModal } from './components/RouteBuilderModal';
 import { DownloadMapsModal } from './components/DownloadMapsModal';
@@ -384,6 +386,60 @@ export default function App() {
   const totalAscentRef = useRef<number>(totalAscent);
   totalAscentRef.current = totalAscent;
   const autoResumeOrStartRef = useRef<() => void>(() => {});
+  const gpsSpeedRef = useRef(0);
+  const bleSpeedRef = useRef<number | null>(null);
+  const bleSpeedAtRef = useRef(0);
+  const manualPausedRef = useRef(false);
+  const rideSummaryOpenRef = useRef(false);
+  const isAutoPausedRef = useRef(isAutoPaused);
+  isAutoPausedRef.current = isAutoPaused;
+  const autoPauseStateRef = useRef<AutoPauseState>({ lowSpeedSince: null, isAutoPaused: false });
+  const applyAutoPauseRef = useRef<() => void>(() => {});
+  const handleToggleStartPauseRef = useRef<() => void>(() => {});
+  const handleStopActivityRef = useRef<() => void>(() => {});
+
+  const bleCscConnectedRef = useRef(bleStatus.cscConnected);
+  bleCscConnectedRef.current = bleStatus.cscConnected;
+
+  const applyAutoPauseTick = () => {
+    if (!isRecordingRef.current) return;
+    if (rideSummaryOpenRef.current) return;
+    const now = Date.now();
+    // Stale CSC packets (stopped sensor) must not block auto-pause
+    const bleFresh =
+      bleCscConnectedRef.current &&
+      bleSpeedRef.current != null &&
+      now - bleSpeedAtRef.current < 4000
+        ? bleSpeedRef.current
+        : bleCscConnectedRef.current
+          ? 0
+          : null;
+    const result = evaluateAutoPause({
+      gpsKmh: gpsSpeedRef.current,
+      bleKmh: bleFresh,
+      manualPaused: manualPausedRef.current,
+      now,
+      prior: autoPauseStateRef.current
+    });
+    autoPauseStateRef.current = {
+      lowSpeedSince: result.lowSpeedSince,
+      isAutoPaused: result.isAutoPaused
+    };
+    if (result.changedTo === null) return;
+    // Manual pause owns isPaused — never clear it from the auto-pause evaluator
+    if (manualPausedRef.current) {
+      setIsAutoPaused(false);
+      return;
+    }
+    setIsAutoPaused(result.isAutoPaused);
+    setIsPaused(result.isAutoPaused);
+    if (result.isAutoPaused) {
+      bikeBeeper.beep(1800, 0.1);
+    } else {
+      bikeBeeper.beep(2600, 0.1);
+    }
+  };
+  applyAutoPauseRef.current = applyAutoPauseTick;
 
   // Maintain persistent event listeners for movement detection that survive long rides
   useEffect(() => {
@@ -392,14 +448,57 @@ export default function App() {
     });
   }, []);
 
-  // Restore persistent recording notification for orphan / active sessions
+  // Notification action buttons → in-app pause / resume / stop summary
+  useEffect(() => {
+    bindRecordingNotificationActions({
+      onPause: () => {
+        if (!isRecordingRef.current || isPausedRef.current) return;
+        handleToggleStartPauseRef.current();
+      },
+      onResume: () => {
+        if (!activeSessionRef.current) return;
+        if (isRecordingRef.current && !isPausedRef.current) return;
+        manualPausedRef.current = false;
+        handleToggleStartPauseRef.current();
+      },
+      onStop: () => {
+        handleStopActivityRef.current();
+      }
+    });
+  }, []);
+
+  // Live metrics in FGS while a session exists (until Save/Discard)
   useEffect(() => {
     if (!activeSession) return;
-    void startRecordingNotification(
-      isPaused || isAutoPaused ? 'Ride paused' : 'Recording ride…'
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount / session id only
-  }, [activeSession?.id]);
+    const paused = isPaused || isAutoPaused;
+    const status = !gpsStatus.hasFix
+      ? 'GPS lost'
+      : isAutoPaused
+        ? 'Auto-paused'
+        : paused
+          ? 'Paused'
+          : 'Recording';
+    void syncRecordingNotification({
+      status,
+      distanceKm: distanceTraveled / 1000,
+      gainM: totalAscent,
+      ridingSeconds: ridingTime || timeElapsed,
+      paused,
+      breadcrumbs: liveBreadcrumbs,
+      headingDeg: currentHeading
+    });
+  }, [
+    activeSession?.id,
+    isPaused,
+    isAutoPaused,
+    distanceTraveled,
+    totalAscent,
+    ridingTime,
+    timeElapsed,
+    gpsStatus.hasFix,
+    liveBreadcrumbs,
+    currentHeading
+  ]);
 
   // Sound sync
   useEffect(() => {
@@ -491,7 +590,12 @@ export default function App() {
     const unsub = bleManager.subscribe(data => {
       if (data.heartRate !== undefined) setHeartRate(data.heartRate);
       if (data.cadence !== undefined) setCadence(data.cadence);
-      if (data.speed !== undefined) setSpeed(data.speed);
+      if (data.speed !== undefined) {
+        setSpeed(data.speed);
+        bleSpeedRef.current = data.speed;
+        bleSpeedAtRef.current = Date.now();
+        applyAutoPauseRef.current();
+      }
       if (data.power !== undefined) setPower(data.power);
     });
     return unsub;
@@ -585,7 +689,10 @@ export default function App() {
           localStorage.setItem('magene-last-known-gps', JSON.stringify({ lat: fix.lat, lng: fix.lng }));
         } catch {}
 
-        // Weak / display-only: update map puck + HUD only
+        gpsSpeedRef.current = fix.speedKmh;
+        applyAutoPauseRef.current();
+
+        // Weak / display-only: map puck + HUD only (auto-pause already ticked above)
         if (fix.displayOnly) {
           if (fix.heading) setCurrentHeading(fix.heading);
           if (fix.altitude > 0) {
@@ -602,16 +709,14 @@ export default function App() {
         setCurrentHeading(fix.heading);
         setSlidingVam(fix.vam ?? gpsService.getSlidingVam());
 
-        // Speed from GPS if BLE speed sensor is not connected
-        // Speed from GPS if BLE speed sensor is not connected
-        if (!bleStatus.cscConnected) {
+        if (!bleCscConnectedRef.current) {
           setSpeed(fix.speedKmh);
           if (isRecordingRef.current && !isPausedRef.current) {
             setMaxSpeed(prev => Math.max(prev, fix.speedKmh));
           }
         }
 
-        // Auto-resume on movement (>= 2.0 km/h) when a session already exists
+        // Auto-resume orphan / auto-paused only (manual pause blocked in handler)
         const isNotActive = !isRecordingRef.current || isPausedRef.current;
         if (isNotActive && fix.speedKmh >= 3.0) {
           autoResumeOrStartRef.current();
@@ -719,19 +824,7 @@ export default function App() {
           errorMessage: err
         });
       },
-      // Auto-Pause & Auto-Resume callback: speed < 3 km/h for >3s or movement >= 3 km/h
-      (autoPaused: boolean) => {
-        if (!isRecordingRef.current) return;
-        setIsAutoPaused(autoPaused);
-        setIsPaused(autoPaused);
-        if (autoPaused) {
-          bikeBeeper.beep(1800, 0.1);
-          void updateRecordingNotification('Auto-paused (speed < 3 km/h)');
-        } else {
-          bikeBeeper.beep(2600, 0.1);
-          void startRecordingNotification('Recording ride…');
-        }
-      },
+      undefined,
       { batterySaver }
     );
 
@@ -746,7 +839,9 @@ export default function App() {
     return () => {
       gpsService.stopTracking(false, false);
     };
-  }, [bleStatus.cscConnected, batterySaver]);
+    // CSC connect must not restart the Capacitor watch (leak / double distance).
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- bleStatus.cscConnected read via closure for HUD speed only
+  }, [batterySaver]);
 
   // Prompt rider on initial GPS fix if no activity is running
   useEffect(() => {
@@ -792,6 +887,7 @@ export default function App() {
         });
         setTimeElapsed(prev => prev + 1);
       }
+      applyAutoPauseRef.current();
     }, 1000);
 
     return () => clearInterval(timer);
@@ -968,6 +1064,22 @@ export default function App() {
 
   // Start New Activity Session
   const handleStartNewActivity = (customRouteName?: string) => {
+    void (async () => {
+      const perm = await ensureRideLocationPermissions();
+      if (!perm.ok) {
+        const go = window.confirm(
+          'ImageneCycle needs Location set to “Allow all the time” so recording continues with the screen locked.\n\nOpen app settings now?'
+        );
+        if (go) await openRideLocationSettings();
+        return;
+      }
+      beginNewActivitySession(customRouteName);
+    })();
+  };
+
+  const beginNewActivitySession = (customRouteName?: string) => {
+    manualPausedRef.current = false;
+    autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
     const newSession: ActiveRideSession = {
       id: `session-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       startedAt: Date.now(),
@@ -1029,7 +1141,6 @@ export default function App() {
     freeRideClimbRecorder.reset();
     setFreeClimbTick(t => t + 1);
     bikeBeeper.beep(2600, 0.12);
-    void startRecordingNotification('Recording ride…');
   };
 
   // Auto-resume only — never create a session; rider must tap START RIDE
@@ -1037,7 +1148,14 @@ export default function App() {
     if (isRecordingRef.current && !isPausedRef.current) {
       return;
     }
+    if (rideSummaryOpenRef.current) return;
+    // Manual pause: do not force-resume on GPS movement
+    if (isPausedRef.current && manualPausedRef.current && !isAutoPausedRef.current) {
+      return;
+    }
     if (activeSessionRef.current || isPausedRef.current) {
+      manualPausedRef.current = false;
+      autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
       setIsRecording(true);
       setIsPaused(false);
       setIsAutoPaused(false);
@@ -1056,7 +1174,6 @@ export default function App() {
         saveActiveSession(resumed);
       }
       bikeBeeper.beep(2600, 0.08);
-      void startRecordingNotification('Recording ride…');
     }
   };
   autoResumeOrStartRef.current = handleAutoResumeOrStart;
@@ -1071,6 +1188,8 @@ export default function App() {
 
     // Orphan / paused session → resume recording
     if (!isRecording || isPaused) {
+      manualPausedRef.current = false;
+      autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
       setIsRecording(true);
       setIsPaused(false);
       setIsAutoPaused(false);
@@ -1086,12 +1205,14 @@ export default function App() {
       setActiveSession(resumed);
       saveActiveSession(resumed);
       bikeBeeper.beep(2600, 0.08);
-      void startRecordingNotification('Recording ride…');
       return;
     }
 
-    // Recording → pause
+    // Recording → manual pause
+    manualPausedRef.current = true;
     setIsPaused(true);
+    setIsAutoPaused(false);
+    autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
     if (sessionBufferRef.current) {
       sessionBufferRef.current.status = 'paused';
     }
@@ -1103,8 +1224,8 @@ export default function App() {
     };
     setActiveSession(paused);
     saveActiveSession(paused);
-    void updateRecordingNotification('Ride paused');
   };
+  handleToggleStartPauseRef.current = handleToggleStartPause;
 
   const handleLap = () => {
     const nextLapNum = lapCount + 1;
@@ -1134,10 +1255,15 @@ export default function App() {
 
   // Stop / Finish Activity - Prompts RideSummaryModal with Save, Resume, and Discard
   const handleStopActivity = () => {
+    manualPausedRef.current = true;
+    rideSummaryOpenRef.current = true;
     setIsPaused(true);
+    setIsAutoPaused(false);
+    autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
     setIsRideSummaryOpen(true);
     bikeBeeper.beep(1800, 0.1);
   };
+  handleStopActivityRef.current = handleStopActivity;
 
   const handleSaveActivity = (customTitle?: string) => {
     const finalMoving = ridingTime || timeElapsed;
@@ -1167,6 +1293,8 @@ export default function App() {
     setIsRecording(false);
     setIsPaused(false);
     setIsAutoPaused(false);
+    manualPausedRef.current = false;
+    autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
     setRidingTime(0);
     setSaddleTime(0);
     setTimeElapsed(0);
@@ -1179,22 +1307,25 @@ export default function App() {
     setLapCount(0);
     setLatestLapAlert(null);
     setRideHistory(loadRideHistory());
+    rideSummaryOpenRef.current = false;
     setIsRideSummaryOpen(false);
     void stopRecordingNotification();
     bikeBeeper.beep(2600, 0.15);
   };
 
   const handleResumeFromSummary = () => {
+    rideSummaryOpenRef.current = false;
     setIsRideSummaryOpen(false);
     setIsPaused(false);
     setIsAutoPaused(false);
+    manualPausedRef.current = false;
+    autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
     if (activeSession) {
       gpsService.setTrackingSessionId(activeSession.id);
       if (sessionBufferRef.current) {
         sessionBufferRef.current.status = 'recording';
       }
     }
-    void startRecordingNotification('Recording ride…');
     bikeBeeper.beep(2600, 0.08);
   };
 
@@ -1206,6 +1337,8 @@ export default function App() {
     setIsRecording(false);
     setIsPaused(false);
     setIsAutoPaused(false);
+    manualPausedRef.current = false;
+    autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
     void stopRecordingNotification();
     setRidingTime(0);
     setSaddleTime(0);
@@ -1218,6 +1351,7 @@ export default function App() {
     setLastLapTime(0);
     setLapCount(0);
     setLatestLapAlert(null);
+    rideSummaryOpenRef.current = false;
     setIsRideSummaryOpen(false);
     freeRideClimbRecorder.reset();
     setFreeClimbTick(t => t + 1);
@@ -1422,6 +1556,7 @@ export default function App() {
           onAutoCenterChange={handleAutoCenterChange}
           invertHeading={invertHeading}
           onToggleInvertHeading={handleToggleInvertHeading}
+          preferHeadingUp={isRecording}
         />
       </div>
 

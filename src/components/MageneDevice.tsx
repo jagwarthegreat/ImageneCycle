@@ -88,6 +88,8 @@ interface MageneDeviceProps {
   onAutoCenterChange?: (enabled: boolean) => void;
   invertHeading?: boolean;
   onToggleInvertHeading?: () => void;
+  /** Drive map HDG UP while a ride is recording */
+  preferHeadingUp?: boolean;
 }
 
 function formatClock24h(d: Date): string {
@@ -170,7 +172,8 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   onToggleAutoCenter,
   onAutoCenterChange,
   invertHeading,
-  onToggleInvertHeading
+  onToggleInvertHeading,
+  preferHeadingUp = false
 }) => {
   const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
   useEffect(() => {
@@ -600,6 +603,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 onAutoCenterChange={onAutoCenterChange}
                 invertHeading={invertHeading}
                 onToggleInvertHeading={onToggleInvertHeading}
+                preferHeadingUp={preferHeadingUp}
               />
               {navBranch?.offRoute && (
                 <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[450] px-2 py-1 rounded-md bg-amber-500 text-black text-[9px] font-sports font-bold shadow">
@@ -959,6 +963,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 onAutoCenterChange={onAutoCenterChange}
                 invertHeading={invertHeading}
                 onToggleInvertHeading={onToggleInvertHeading}
+                preferHeadingUp={preferHeadingUp}
               />
               {navBranch?.offRoute && (
                 <div className="absolute top-2 left-1/2 -translate-x-1/2 z-[450] px-2 py-1 rounded-md bg-amber-500 text-black text-[9px] font-sports font-bold shadow">

@@ -1,8 +1,6 @@
 /**
- * Real Production GPS Tracking Service using Browser Geolocation API
- * Handles high-accuracy coordinate acquisition, noise filtering,
- * bearing calculation, geodesic distance accumulation, smoothed grade estimation,
- * Auto-Pause, Battery Saver (10s polling), and 30s sliding-window VAM.
+ * GPS tracking: Capacitor Geolocation on Android, browser Geolocation elsewhere.
+ * Bearing / COG, distance, grade, VAM. Auto-pause lives in App (autoPause.ts).
  */
 
 export interface GpsFix {
@@ -24,6 +22,8 @@ export interface GpsTrackingOptions {
   batterySaver?: boolean;
 }
 
+import { Capacitor } from '@capacitor/core';
+import { Geolocation } from '@capacitor/geolocation';
 import { correctEllipsoidalAltitude } from './elevationService';
 import { smoothedGradeFromHistory } from './smoothedGrade';
 
@@ -77,24 +77,46 @@ export function accuracyToQuality(accuracy: number): GpsFix['quality'] {
 const VAM_WINDOW_MS = 30_000;
 const BATTERY_SAVER_INTERVAL_MS = 10_000;
 const GPS_TIMEOUT_MS = 25_000;
-/** Accept briefly cached high-accuracy fixes so watch is not cold every time */
 const WATCH_MAX_AGE_MS = 5_000;
-/** Network / A-GPS warm fix for instant HUD (displayOnly until accuracy improves) */
 const FAST_FIX_MAX_AGE_MS = 60_000;
 const FAST_FIX_TIMEOUT_MS = 5_000;
 const WARMUP_MAX_ACC_M = 50;
 const TRACKING_MAX_ACC_M = 80;
 const MAX_JUMP_KMH = 80;
 
-/** Low-accuracy cached options for instant first paint */
 export const FAST_GEO_OPTIONS: PositionOptions = {
   enableHighAccuracy: false,
   maximumAge: FAST_FIX_MAX_AGE_MS,
   timeout: FAST_FIX_TIMEOUT_MS
 };
 
+type CoordsLike = {
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+  altitude: number | null;
+  speed: number | null;
+  heading: number | null;
+  course?: number | null;
+  trueHeading?: number | null;
+};
+
+function isAndroidNative(): boolean {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'android';
+}
+
+function deviceHeading(coords: CoordsLike): number | null {
+  const candidates = [coords.heading, coords.course ?? null, coords.trueHeading ?? null];
+  for (const h of candidates) {
+    if (h !== null && h !== undefined && !isNaN(h) && h >= 0) return h;
+  }
+  return null;
+}
+
 class GpsService {
   private watchId: number | null = null;
+  private capacitorWatchId: string | null = null;
+  private capacitorStartGen = 0;
   private pollIntervalId: number | null = null;
   private prevFix: GpsFix | null = null;
   private altitudeHistory: { alt: number; dist: number }[] = [];
@@ -105,24 +127,17 @@ class GpsService {
   private headingHistory: number[] = [];
   private lastKnownHeading: number = 0;
 
-  // Active activity session identification
   private currentTrackingSessionId: string | null = null;
 
-  // Persistent Movement Detection for long rides
   private onMovementDetectedCb: ((speedKmh: number) => void) | null = null;
   private persistentMotionListenerAttached = false;
-
-  // Auto-Pause state & timer
-  private lowSpeedStartTime: number | null = null;
-  private isAutoPaused: boolean = false;
-  private autoPauseCheckInterval: number | null = null;
-  private onAutoPauseChange: ((paused: boolean) => void) | null = null;
 
   private onFixCb: ((fix: GpsFix, deltaDist: number, instantGrade: number) => void) | null = null;
   private onErrorCb: ((err: string) => void) | null = null;
   private batterySaver: boolean = false;
 
   public isSupported(): boolean {
+    if (isAndroidNative()) return true;
     return typeof navigator !== 'undefined' && 'geolocation' in navigator;
   }
 
@@ -148,10 +163,6 @@ class GpsService {
     this.initPersistentMovementListener();
   }
 
-  /**
-   * Maintains persistent event listeners for movement detection that are not prone
-   * to being garbage collected during long rides or component unmounts.
-   */
   private initPersistentMovementListener(): void {
     if (typeof window === 'undefined') return;
     if (this.persistentMotionListenerAttached) return;
@@ -165,7 +176,6 @@ class GpsService {
           const y = acc.y ?? 0;
           const z = acc.z ?? 0;
           const mag = Math.sqrt(x * x + y * y + z * z);
-          // If significant user acceleration is detected (over background gravity vibration)
           if ((event.acceleration && mag > 1.2) || mag > 12.5) {
             this.onMovementDetectedCb?.(2.0);
           }
@@ -173,22 +183,24 @@ class GpsService {
       };
       window.addEventListener('devicemotion', handleDeviceMotion, { passive: true });
     } catch {
-      // Browser or device does not permit devicemotion; GPS-based velocity acts as reliable fallback
+      /* GPS velocity fallback */
     }
   }
 
-  private geoOptions(maxAge: number): PositionOptions {
+  private geoOptions(maxAge: number) {
     return {
       enableHighAccuracy: true,
       timeout: GPS_TIMEOUT_MS,
-      maximumAge: maxAge
+      maximumAge: maxAge,
+      interval: this.batterySaver ? BATTERY_SAVER_INTERVAL_MS : 1000,
+      minimumUpdateInterval: this.batterySaver ? BATTERY_SAVER_INTERVAL_MS : 1000
     };
   }
 
   public startTracking(
     onFix: (fix: GpsFix, deltaDist: number, instantGrade: number) => void,
     onError: (err: string) => void,
-    onAutoPauseChange?: (paused: boolean) => void,
+    _onAutoPauseChange?: (paused: boolean) => void,
     options?: GpsTrackingOptions
   ): boolean {
     if (!this.isSupported()) {
@@ -199,33 +211,29 @@ class GpsService {
     this.stopTracking(false);
     this.onFixCb = onFix;
     this.onErrorCb = onError;
-    this.onAutoPauseChange = onAutoPauseChange || null;
-    this.lowSpeedStartTime = null;
     this.batterySaver = !!options?.batterySaver;
 
-    this.autoPauseCheckInterval = window.setInterval(() => {
-      if (this.lowSpeedStartTime && !this.isAutoPaused) {
-        if (Date.now() - this.lowSpeedStartTime >= 3000) {
-          this.isAutoPaused = true;
-          this.onAutoPauseChange?.(true);
-        }
-      }
-    }, 1000);
+    if (isAndroidNative()) {
+      void this.startCapacitorTracking();
+    } else {
+      this.startBrowserTracking();
+    }
 
-    // Instant warm path: network/A-GPS cache (displayOnly if accuracy still poor)
+    return true;
+  }
+
+  private startBrowserTracking(): void {
     navigator.geolocation.getCurrentPosition(
-      (pos) => this.handlePosition(pos),
-      () => {
-        /* ignore — watch/poll continues */
-      },
+      (pos) => this.handleCoords(pos.coords, pos.timestamp),
+      () => {},
       FAST_GEO_OPTIONS
     );
 
     if (this.batterySaver) {
       const poll = () => {
         navigator.geolocation.getCurrentPosition(
-          (pos) => this.handlePosition(pos),
-          (err) => this.handleError(err),
+          (pos) => this.handleCoords(pos.coords, pos.timestamp),
+          (err) => this.handleBrowserError(err),
           this.geoOptions(BATTERY_SAVER_INTERVAL_MS)
         );
       };
@@ -233,13 +241,64 @@ class GpsService {
       this.pollIntervalId = window.setInterval(poll, BATTERY_SAVER_INTERVAL_MS);
     } else {
       this.watchId = navigator.geolocation.watchPosition(
-        (pos) => this.handlePosition(pos),
-        (err) => this.handleError(err),
+        (pos) => this.handleCoords(pos.coords, pos.timestamp),
+        (err) => this.handleBrowserError(err),
         this.geoOptions(WATCH_MAX_AGE_MS)
       );
     }
+  }
 
-    return true;
+  private async startCapacitorTracking(): Promise<void> {
+    const gen = ++this.capacitorStartGen;
+    try {
+      const warm = await Geolocation.getCurrentPosition({
+        enableHighAccuracy: false,
+        maximumAge: FAST_FIX_MAX_AGE_MS,
+        timeout: FAST_FIX_TIMEOUT_MS
+      });
+      if (gen !== this.capacitorStartGen) return;
+      this.handleCoords(warm.coords as CoordsLike, warm.timestamp);
+    } catch {
+      /* watch continues */
+    }
+    if (gen !== this.capacitorStartGen) return;
+
+    if (this.batterySaver) {
+      const poll = async () => {
+        if (gen !== this.capacitorStartGen) return;
+        try {
+          const pos = await Geolocation.getCurrentPosition(this.geoOptions(BATTERY_SAVER_INTERVAL_MS));
+          if (gen !== this.capacitorStartGen) return;
+          this.handleCoords(pos.coords as CoordsLike, pos.timestamp);
+        } catch (err) {
+          if (gen === this.capacitorStartGen) this.handleCapacitorError(err);
+        }
+      };
+      void poll();
+      this.pollIntervalId = window.setInterval(() => void poll(), BATTERY_SAVER_INTERVAL_MS);
+      return;
+    }
+
+    try {
+      const id = await Geolocation.watchPosition(
+        this.geoOptions(WATCH_MAX_AGE_MS),
+        (pos, err) => {
+          if (gen !== this.capacitorStartGen) return;
+          if (err || !pos) {
+            this.handleCapacitorError(err);
+            return;
+          }
+          this.handleCoords(pos.coords as CoordsLike, pos.timestamp);
+        }
+      );
+      if (gen !== this.capacitorStartGen) {
+        void Geolocation.clearWatch({ id });
+        return;
+      }
+      this.capacitorWatchId = id;
+    } catch (err) {
+      if (gen === this.capacitorStartGen) this.handleCapacitorError(err);
+    }
   }
 
   private updateSlidingVam(alt: number, now: number): number {
@@ -266,30 +325,51 @@ class GpsService {
     return this.slidingVam;
   }
 
-  private handlePosition(pos: GeolocationPosition) {
-    const coords = pos.coords;
-    const now = pos.timestamp;
+  private resolveHeading(coords: CoordsLike, speedKmh: number, deltaDist: number, lat: number, lng: number): number {
+    let heading = this.lastKnownHeading;
+    if (this.prevFix && (speedKmh >= 2.0 || deltaDist >= 1.5)) {
+      const instantaneousBearing = calculateBearingDegrees(this.prevFix.lat, this.prevFix.lng, lat, lng);
+      this.headingHistory.push(instantaneousBearing);
+      if (this.headingHistory.length > 3) this.headingHistory.shift();
+      heading = smoothCircularAngles(this.headingHistory);
+      this.lastKnownHeading = heading;
+    } else {
+      const dh = deviceHeading(coords);
+      if (dh !== null) {
+        heading = dh;
+        this.lastKnownHeading = heading;
+      }
+    }
+    return heading;
+  }
+
+  private handleCoords(coords: CoordsLike, timestamp: number) {
+    const now = timestamp || Date.now();
     const lat = coords.latitude;
     const lng = coords.longitude;
     const rawAlt = coords.altitude ?? 0;
     const alt = rawAlt > 0 ? correctEllipsoidalAltitude(lat, lng, rawAlt) : 0;
     const acc = coords.accuracy ?? 999;
 
-    // Warm-up: need a decent fix before accepting tracking; then allow slightly looser
-    const maxAcc = this.hasGoodLock ? TRACKING_MAX_ACC_M : WARMUP_MAX_ACC_M;
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
       return;
     }
+
+    const maxAcc = this.hasGoodLock ? TRACKING_MAX_ACC_M : WARMUP_MAX_ACC_M;
     if (acc > maxAcc) {
-      // HUD: show Weak (±m) instead of silent Searching — do not accumulate distance
+      const heading = this.resolveHeading(coords, 0, 0, lat, lng);
+      let speedKmh = 0;
+      if (coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0) {
+        speedKmh = coords.speed * 3.6;
+      }
       this.onFixCb?.(
         {
           lat,
           lng,
           altitude: alt,
           accuracy: acc,
-          speedKmh: 0,
-          heading: coords.heading ?? 0,
+          speedKmh: Math.round(speedKmh * 10) / 10,
+          heading: Math.round(heading),
           timestamp: now,
           vam: this.slidingVam,
           quality: accuracyToQuality(acc),
@@ -310,7 +390,6 @@ class GpsService {
       const rawDist = haversineDistanceMeters(this.prevFix.lat, this.prevFix.lng, lat, lng);
       const impliedKmh = (rawDist / dtSeconds) * 3.6;
 
-      // Drop impossible jumps when accuracy is weak
       if (impliedKmh > MAX_JUMP_KMH && acc > 25) {
         return;
       }
@@ -325,50 +404,17 @@ class GpsService {
       } else if (deltaDist > 0 && dtSeconds > 0) {
         speedKmh = (deltaDist / dtSeconds) * 3.6;
       }
+    } else if (coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0) {
+      speedKmh = coords.speed * 3.6;
     }
 
-    // Heading calculation:
-    // Prioritize Course Over Ground (GPS vector bearing from prevFix) whenever moving (speedKmh >= 2.0 or deltaDist >= 1.5).
-    // Apply 3-sample circular angular smoothing to eliminate heading jitter.
-    // When stopped (< 2.0 km/h), maintain last smoothed heading or fall back to device compass.
-    let heading = this.lastKnownHeading;
+    const heading = this.resolveHeading(coords, speedKmh, deltaDist, lat, lng);
 
-    if (this.prevFix && (speedKmh >= 2.0 || deltaDist >= 1.5)) {
-      const instantaneousBearing = calculateBearingDegrees(this.prevFix.lat, this.prevFix.lng, lat, lng);
-      this.headingHistory.push(instantaneousBearing);
-      if (this.headingHistory.length > 3) {
-        this.headingHistory.shift();
-      }
-      heading = smoothCircularAngles(this.headingHistory);
-      this.lastKnownHeading = heading;
-    } else if (coords.heading !== null && !isNaN(coords.heading) && coords.heading >= 0) {
-      heading = coords.heading;
-      this.lastKnownHeading = heading;
-    }
-
-    // Auto-pause when speed stays below 3 km/h; resume when speed >= 3
-    if (speedKmh < 3.0) {
-      if (!this.lowSpeedStartTime) {
-        this.lowSpeedStartTime = Date.now();
-      } else if (Date.now() - this.lowSpeedStartTime >= 3000 && !this.isAutoPaused) {
-        this.isAutoPaused = true;
-        this.onAutoPauseChange?.(true);
-      }
-    } else {
-      this.lowSpeedStartTime = null;
-      if (this.isAutoPaused) {
-        this.isAutoPaused = false;
-        this.onAutoPauseChange?.(false);
-      }
-    }
-
-    // Wake / resume existing sessions on movement
     if (speedKmh >= 3.0 || deltaDist >= 1.5) {
       this.onMovementDetectedCb?.(speedKmh);
     }
 
     this.altitudeHistory.push({ alt, dist: this.accumulatedDistMeters });
-    // Keep ~2× smoothing window of path so 50 m grade has enough samples
     const maxSpanM = 100;
     while (
       this.altitudeHistory.length > 40 ||
@@ -379,9 +425,7 @@ class GpsService {
     }
 
     const instantGrade = smoothedGradeFromHistory(this.altitudeHistory);
-
     const vam = this.updateSlidingVam(alt, now);
-    const quality = accuracyToQuality(acc);
 
     const fix: GpsFix = {
       lat,
@@ -392,14 +436,14 @@ class GpsService {
       heading: Math.round(heading),
       timestamp: now,
       vam,
-      quality
+      quality: accuracyToQuality(acc)
     };
 
     this.prevFix = fix;
     this.onFixCb?.(fix, deltaDist, Math.round(instantGrade * 10) / 10);
   }
 
-  private handleError(err: GeolocationPositionError) {
+  private handleBrowserError(err: GeolocationPositionError) {
     let msg = 'GPS Error';
     switch (err.code) {
       case err.PERMISSION_DENIED:
@@ -415,21 +459,27 @@ class GpsService {
     this.onErrorCb?.(msg);
   }
 
+  private handleCapacitorError(err: unknown) {
+    const msg = err && typeof err === 'object' && 'message' in err
+      ? String((err as { message: string }).message)
+      : 'GPS position unavailable.';
+    this.onErrorCb?.(msg || 'GPS Error');
+  }
+
   public stopTracking(resetLock = true, clearSession = false) {
+    this.capacitorStartGen += 1;
     if (this.watchId !== null) {
       navigator.geolocation.clearWatch(this.watchId);
       this.watchId = null;
+    }
+    if (this.capacitorWatchId !== null) {
+      void Geolocation.clearWatch({ id: this.capacitorWatchId });
+      this.capacitorWatchId = null;
     }
     if (this.pollIntervalId !== null) {
       clearInterval(this.pollIntervalId);
       this.pollIntervalId = null;
     }
-    if (this.autoPauseCheckInterval !== null) {
-      clearInterval(this.autoPauseCheckInterval);
-      this.autoPauseCheckInterval = null;
-    }
-    this.lowSpeedStartTime = null;
-    this.isAutoPaused = false;
     if (resetLock) {
       this.hasGoodLock = false;
     }
@@ -446,8 +496,6 @@ class GpsService {
     this.altitudeHistory = [];
     this.altitudeTimeHistory = [];
     this.slidingVam = 0;
-    this.lowSpeedStartTime = null;
-    this.isAutoPaused = false;
     this.hasGoodLock = false;
     this.headingHistory = [];
     this.lastKnownHeading = 0;

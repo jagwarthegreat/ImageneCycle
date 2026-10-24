@@ -76,6 +76,8 @@ interface GpsMapViewProps {
   onAutoCenterChange?: (enabled: boolean) => void;
   invertHeading?: boolean;
   onToggleInvertHeading?: () => void;
+  /** When true (active recording), prefer HDG UP so puck matches travel. */
+  preferHeadingUp?: boolean;
 }
 
 export const GpsMapView: React.FC<GpsMapViewProps> = ({
@@ -94,7 +96,8 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   onToggleAutoCenter,
   onAutoCenterChange,
   invertHeading: propInvertHeading,
-  onToggleInvertHeading
+  onToggleInvertHeading,
+  preferHeadingUp = false
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -137,7 +140,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     }
   };
 
-  const [headingUpMode, setHeadingUpMode] = useState<boolean>(false); // Default: NORTH UP
+  const [headingUpMode, setHeadingUpMode] = useState<boolean>(() => preferHeadingUp);
   const [mapEpoch, setMapEpoch] = useState(0); // bump when Leaflet map is ready (for HDG drag bind)
   const [internalInvertHeading, setInternalInvertHeading] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
@@ -148,6 +151,10 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     }
   });
   const invertHeading = propInvertHeading !== undefined ? propInvertHeading : internalInvertHeading;
+
+  useEffect(() => {
+    if (preferHeadingUp) setHeadingUpMode(true);
+  }, [preferHeadingUp]);
 
   const handleToggleInvertHeading = () => {
     if (onToggleInvertHeading) {
@@ -163,8 +170,9 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     });
   };
 
-  /** SVG tip faces "up"; device heading was landing opposite of travel — bake in +180. */
-  const ICON_HEADING_OFFSET_DEG = 180;
+  // SVG tip faces screen-up; COG/plugin heading is clockwise from north — no baked flip.
+  // shortcut: if a device still points opposite, use invertHeading toggle.
+  const ICON_HEADING_OFFSET_DEG = 0;
   const effectiveHeading =
     ((heading || 0) + ICON_HEADING_OFFSET_DEG + (invertHeading ? 180 : 0)) % 360;
   const rotateWrapperRef = useRef<HTMLDivElement>(null);

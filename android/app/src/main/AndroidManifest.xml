@@ -16,6 +16,8 @@
     <!-- GPS / ride tracking (also helps BLE scan on older WebViews) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Lock-screen / screen-off recording: Allow all the time -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
     <!-- Foreground ride recording notification -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
