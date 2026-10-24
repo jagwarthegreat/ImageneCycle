@@ -49,26 +49,39 @@ public class BackgroundLocationPlugin extends Plugin {
             call.resolve(ret);
             return;
         }
-        // Android 11+: system sends user to location settings for "Allow all the time"
+        // Android 11+: system UI for ACCESS_BACKGROUND_LOCATION lands on Location → Allow all the time
         requestPermissionForAlias("backgroundLocation", call, "backgroundPermCallback");
     }
 
     @PermissionCallback
     private void backgroundPermCallback(PluginCall call) {
         JSObject ret = new JSObject();
-        boolean granted = hasBackground();
-        ret.put("granted", granted);
-        if (!granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            openAppLocationSettings();
-            ret.put("openedSettings", true);
-        }
+        ret.put("granted", hasBackground());
+        // Do not bounce to generic App info on cancel — that buries "Allow all the time".
         call.resolve(ret);
     }
 
     @PluginMethod
     public void openSettings(PluginCall call) {
-        openAppLocationSettings();
+        // Prefer re-triggering the background permission flow (Location page) over App info.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !hasBackground()) {
+            requestPermissionForAlias("backgroundLocation", call, "openSettingsCallback");
+            return;
+        }
+        openAppDetailsSettings();
         call.resolve();
+    }
+
+    @PermissionCallback
+    private void openSettingsCallback(PluginCall call) {
+        JSObject ret = new JSObject();
+        boolean granted = hasBackground();
+        ret.put("granted", granted);
+        if (!granted) {
+            openAppDetailsSettings();
+            ret.put("openedSettings", true);
+        }
+        call.resolve(ret);
     }
 
     private boolean hasBackground() {
@@ -81,7 +94,7 @@ public class BackgroundLocationPlugin extends Plugin {
         ) == PackageManager.PERMISSION_GRANTED;
     }
 
-    private void openAppLocationSettings() {
+    private void openAppDetailsSettings() {
         Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
         intent.setData(Uri.fromParts("package", getContext().getPackageName(), null));
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);

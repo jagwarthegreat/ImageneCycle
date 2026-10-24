@@ -592,10 +592,11 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       if (lat !== undefined && lng !== undefined && !isNaN(lat) && !isNaN(lng)) {
         markerRef.current.setLatLng([lat, lng]);
 
-        // NORTH UP: arrow rotates by heading. HDG UP: map rotates under a screen-up arrow (= travel).
+        // Needle always tracks heading in map space. North-up: tip = travel. HDG UP: wrapper is
+        // rotate(-heading), so rotate(+heading) on the needle keeps tip screen-forward.
         const needle = mapContainerRef.current?.querySelector('.gps-heading-needle') as HTMLElement | null;
         if (needle) {
-          needle.style.transform = headingUpMode ? 'rotate(0deg)' : `rotate(${effectiveHeading}deg)`;
+          needle.style.transform = `rotate(${effectiveHeading}deg)`;
         }
 
         // On first valid fix, center with zoom 16

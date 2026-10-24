@@ -2,7 +2,6 @@
  * Fine location → Android “Allow all the time” (background) for lock-screen recording.
  *
  * Callers: App.tsx handleStartNewActivity / Start gate.
- * No prior locationPermissions module (Glob empty).
  */
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Geolocation } from '@capacitor/geolocation';
@@ -18,7 +17,7 @@ export interface RideLocationPermissionResult {
 interface BackgroundLocationPlugin {
   check(): Promise<{ granted: boolean }>;
   request(): Promise<{ granted: boolean; openedSettings?: boolean }>;
-  openSettings(): Promise<void>;
+  openSettings(): Promise<{ granted?: boolean; openedSettings?: boolean } | void>;
 }
 
 const BackgroundLocation = registerPlugin<BackgroundLocationPlugin>('BackgroundLocation');
@@ -33,6 +32,22 @@ export function getLastRideLocationPermission(): RideLocationPermissionResult | 
   return lastResult;
 }
 
+/** Wait until the WebView is visible again (return from system Location settings). */
+export function waitForAppVisible(): Promise<void> {
+  if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+    return Promise.resolve();
+  }
+  return new Promise(resolve => {
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        document.removeEventListener('visibilitychange', onVis);
+        resolve();
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+  });
+}
+
 export async function openRideLocationSettings(): Promise<void> {
   if (!isAndroidNative()) return;
   try {
@@ -42,7 +57,9 @@ export async function openRideLocationSettings(): Promise<void> {
   }
 }
 
-export async function ensureRideLocationPermissions(): Promise<RideLocationPermissionResult> {
+export async function ensureRideLocationPermissions(
+  opts?: { skipBackgroundRationale?: boolean }
+): Promise<RideLocationPermissionResult> {
   if (!isAndroidNative()) {
     lastResult = { ok: true, needSettings: false, location: 'granted', background: 'n/a' };
     return lastResult;
@@ -65,8 +82,22 @@ export async function ensureRideLocationPermissions(): Promise<RideLocationPermi
 
     let bg = await BackgroundLocation.check();
     if (!bg.granted) {
+      if (!opts?.skipBackgroundRationale) {
+        const proceed = window.confirm(
+          'Next, choose Location → “Allow all the time” so recording continues with the screen locked.\n\nContinue?'
+        );
+        if (!proceed) {
+          lastResult = {
+            ok: false,
+            needSettings: true,
+            location: 'granted',
+            background: 'denied'
+          };
+          return lastResult;
+        }
+      }
       const req = await BackgroundLocation.request();
-      bg = { granted: req.granted };
+      bg = { granted: !!req.granted };
     }
 
     lastResult = {

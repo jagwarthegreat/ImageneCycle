@@ -26,7 +26,11 @@ import {
   bindRecordingNotificationActions
 } from './utils/recordingForeground';
 import { evaluateAutoPause, type AutoPauseState } from './utils/autoPause';
-import { ensureRideLocationPermissions, openRideLocationSettings } from './utils/locationPermissions';
+import {
+  ensureRideLocationPermissions,
+  openRideLocationSettings,
+  waitForAppVisible
+} from './utils/locationPermissions';
 import { StartActivityPrompt } from './components/StartActivityPrompt';
 import { RouteBuilderModal } from './components/RouteBuilderModal';
 import { DownloadMapsModal } from './components/DownloadMapsModal';
@@ -1065,14 +1069,18 @@ export default function App() {
   // Start New Activity Session
   const handleStartNewActivity = (customRouteName?: string) => {
     void (async () => {
-      const perm = await ensureRideLocationPermissions();
-      if (!perm.ok) {
+      let perm = await ensureRideLocationPermissions();
+      if (!perm.ok && perm.needSettings) {
         const go = window.confirm(
-          'ImageneCycle needs Location set to “Allow all the time” so recording continues with the screen locked.\n\nOpen app settings now?'
+          'Location is still not “Allow all the time”. Open Location settings to enable it?'
         );
-        if (go) await openRideLocationSettings();
-        return;
+        if (go) {
+          await openRideLocationSettings();
+          await waitForAppVisible();
+          perm = await ensureRideLocationPermissions({ skipBackgroundRationale: true });
+        }
       }
+      if (!perm.ok) return;
       beginNewActivitySession(customRouteName);
     })();
   };
@@ -1556,7 +1564,7 @@ export default function App() {
           onAutoCenterChange={handleAutoCenterChange}
           invertHeading={invertHeading}
           onToggleInvertHeading={handleToggleInvertHeading}
-          preferHeadingUp={isRecording}
+          preferHeadingUp={false}
         />
       </div>
 
