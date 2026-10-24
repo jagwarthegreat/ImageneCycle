@@ -1,0 +1,20 @@
+{
+  "format": "magene-nav-v1",
+  "id": "tw",
+  "name": "Taiwan",
+  "fileHint": "tw - Taiwan.nav.json",
+  "bbox": {
+    "minLat": 21.7,
+    "maxLat": 25.5,
+    "minLng": 119.3,
+    "maxLng": 122.2
+  },
+  "routing": {
+    "offlineRouterGraph": false,
+    "note": "Create routes online; saved turn-by-turn works offline."
+  },
+  "notes": [
+    "Magene Navigation Data pack (not Guru .rt)."
+  ],
+  "updatedAt": "2026-10-24"
+}

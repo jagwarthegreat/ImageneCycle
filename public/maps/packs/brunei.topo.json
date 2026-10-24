@@ -1,0 +1,29 @@
+{
+  "format": "magene-topo-v2",
+  "id": "bn",
+  "name": "Brunei",
+  "fileHint": "bn - Brunei.topo.json",
+  "bbox": {
+    "minLat": 4,
+    "maxLat": 5.1,
+    "minLng": 114,
+    "maxLng": 115.5
+  },
+  "elevation": {
+    "source": "route-embedded",
+    "demPmtiles": null,
+    "demNote": "Climb elevation uses saved routes. Contour lines come from the companion contour PMTiles."
+  },
+  "contour": {
+    "url": "/maps/packs/brunei.contour.pmtiles",
+    "fileName": "bn - Brunei.contour.pmtiles",
+    "bytes": 812464,
+    "dataLayer": "contours"
+  },
+  "notes": [
+    "Magene Topographic Data pack (not Guru .elv).",
+    "Installing T downloads this manifest plus contour PMTiles for offline contour lines.",
+    "Per-route elevation profiles remain the primary offline elev source."
+  ],
+  "updatedAt": "2026-10-24"
+}

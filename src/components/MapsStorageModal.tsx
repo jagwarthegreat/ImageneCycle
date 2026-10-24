@@ -107,7 +107,7 @@ export const MapsStorageModal: React.FC<MapsStorageModalProps> = ({ isOpen, onCl
 
         <div className="px-4 py-3 space-y-3 overflow-y-auto flex-1">
           <p className="text-[10px] text-zinc-500 font-sports leading-relaxed">
-            Downloaded Magene packs (PMTiles + .nav.json / .topo.json) live here — not shipped in the app.
+            Downloaded Magene packs (PMTiles + .nav.json / .topo.json + contour.pmtiles) live here — not shipped in the app.
             Guru .vm / .rt / .elv are unsupported. Default Internal = browser OPFS; Custom needs Chromium.
           </p>
 

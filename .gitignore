@@ -18,6 +18,7 @@ public/maps/packs/*.db
 public/maps/packs/*_timestamp
 public/maps/packs/*.timestamp
 
-# go-pmtiles CLI downloaded by npm run maps:ph
+# go-pmtiles CLI downloaded by npm run maps:ph / maps:contours
 tools/go-pmtiles/
+tools/contour-tmp/
 

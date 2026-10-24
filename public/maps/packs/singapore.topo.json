@@ -1,0 +1,29 @@
+{
+  "format": "magene-topo-v2",
+  "id": "sg",
+  "name": "Singapore",
+  "fileHint": "sg - Singapore.topo.json",
+  "bbox": {
+    "minLat": 1.15,
+    "maxLat": 1.48,
+    "minLng": 103.6,
+    "maxLng": 104.1
+  },
+  "elevation": {
+    "source": "route-embedded",
+    "demPmtiles": null,
+    "demNote": "Climb elevation uses saved routes. Contour lines come from the companion contour PMTiles."
+  },
+  "contour": {
+    "url": "/maps/packs/singapore.contour.pmtiles",
+    "fileName": "sg - Singapore.contour.pmtiles",
+    "bytes": 2000000,
+    "dataLayer": "contours"
+  },
+  "notes": [
+    "Magene Topographic Data pack (not Guru .elv).",
+    "Installing T downloads this manifest plus contour PMTiles for offline contour lines.",
+    "Per-route elevation profiles remain the primary offline elev source."
+  ],
+  "updatedAt": "2026-10-24"
+}

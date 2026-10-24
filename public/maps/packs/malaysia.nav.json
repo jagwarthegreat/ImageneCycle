@@ -1,0 +1,20 @@
+{
+  "format": "magene-nav-v1",
+  "id": "my",
+  "name": "Malaysia",
+  "fileHint": "my - Malaysia.nav.json",
+  "bbox": {
+    "minLat": 0.8,
+    "maxLat": 7.5,
+    "minLng": 99.5,
+    "maxLng": 119.5
+  },
+  "routing": {
+    "offlineRouterGraph": false,
+    "note": "Create routes online; saved turn-by-turn works offline."
+  },
+  "notes": [
+    "Magene Navigation Data pack (not Guru .rt)."
+  ],
+  "updatedAt": "2026-10-24"
+}

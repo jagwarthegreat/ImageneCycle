@@ -1,0 +1,29 @@
+{
+  "format": "magene-topo-v2",
+  "id": "vn",
+  "name": "Vietnam",
+  "fileHint": "vn - Vietnam.topo.json",
+  "bbox": {
+    "minLat": 8,
+    "maxLat": 23.5,
+    "minLng": 102,
+    "maxLng": 110
+  },
+  "elevation": {
+    "source": "route-embedded",
+    "demPmtiles": null,
+    "demNote": "Climb elevation uses saved routes. Contour lines come from the companion contour PMTiles."
+  },
+  "contour": {
+    "url": "/maps/packs/vietnam.contour.pmtiles",
+    "fileName": "vn - Vietnam.contour.pmtiles",
+    "bytes": 10000000,
+    "dataLayer": "contours"
+  },
+  "notes": [
+    "Magene Topographic Data pack (not Guru .elv).",
+    "Installing T downloads this manifest plus contour PMTiles for offline contour lines.",
+    "Per-route elevation profiles remain the primary offline elev source."
+  ],
+  "updatedAt": "2026-10-24"
+}

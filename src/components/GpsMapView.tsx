@@ -3,7 +3,8 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { RoutePoint } from '../types/cycling';
 import { createCachedTileLayer } from '../utils/tileCache';
-import { resolveActiveBasemap } from '../utils/mapPacks';
+import { resolveActiveBasemap, resolveActiveContour } from '../utils/mapPacks';
+import { createContourOverlayLayer } from '../utils/contourOverlay';
 import {
   createOfflineBasemapLayer,
   loadMapDetailsPref,
@@ -30,7 +31,13 @@ async function attachBasemap(
   lat: number,
   lng: number,
   details: boolean
-): Promise<{ layer: L.Layer; offline: boolean; packName?: string; error?: string }> {
+): Promise<{
+  layer: L.Layer;
+  contour?: L.Layer | null;
+  offline: boolean;
+  packName?: string;
+  error?: string;
+}> {
   const active = await resolveActiveBasemap(lat || 14.5995, lng || 120.9842);
   if (active?.pmtiles) {
     try {
@@ -41,19 +48,40 @@ async function attachBasemap(
       });
       layer.addTo(map);
       layer.bringToBack?.();
-      return { layer, offline: true, packName: active.packName };
+
+      let contour: L.Layer | null = null;
+      try {
+        const topo = await resolveActiveContour(lat || 14.5995, lng || 120.9842);
+        if (topo?.pmtiles) {
+          contour = createContourOverlayLayer({
+            pmtiles: topo.pmtiles,
+            isDarkMode
+          });
+          contour.addTo(map);
+          // Keep contours above basemap, below route polylines
+          if ('bringToBack' in contour && typeof contour.bringToBack === 'function') {
+            // sit just above basemap
+            (layer as L.GridLayer).bringToBack?.();
+          }
+        }
+      } catch (err) {
+        console.warn('Contour overlay skipped:', err);
+      }
+
+      return { layer, contour, offline: true, packName: active.packName };
     } catch (err) {
       console.warn('Offline PMTiles failed, falling back to world overview:', err);
       const layer = attachWorldOverview(map, isDarkMode);
       return {
         layer,
+        contour: null,
         offline: false,
         error: 'Offline map invalid — using world overview'
       };
     }
   }
 
-  return { layer: attachWorldOverview(map, isDarkMode), offline: false };
+  return { layer: attachWorldOverview(map, isDarkMode), contour: null, offline: false };
 }
 
 interface GpsMapViewProps {
@@ -109,6 +137,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const chevronsRef = useRef<L.LayerGroup | null>(null);
   const endpointsRef = useRef<L.LayerGroup | null>(null);
   const tileLayerRef = useRef<L.Layer | null>(null);
+  const contourLayerRef = useRef<L.Layer | null>(null);
   const [offlineMapReady, setOfflineMapReady] = useState<boolean | null>(null);
   const [activePackName, setActivePackName] = useState<string | null>(null);
   const [basemapError, setBasemapError] = useState<string | null>(null);
@@ -355,19 +384,26 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     };
 
     let cancelled = false;
-    void attachBasemap(map, isDarkMode, lat, lng, mapDetails).then(({ layer, offline, packName, error }) => {
-      if (cancelled || mapInstanceRef.current !== map) {
-        map.removeLayer(layer);
-        return;
+    void attachBasemap(map, isDarkMode, lat, lng, mapDetails).then(
+      ({ layer, contour, offline, packName, error }) => {
+        if (cancelled || mapInstanceRef.current !== map) {
+          map.removeLayer(layer);
+          if (contour) map.removeLayer(contour);
+          return;
+        }
+        if (tileLayerRef.current) {
+          map.removeLayer(tileLayerRef.current);
+        }
+        if (contourLayerRef.current) {
+          map.removeLayer(contourLayerRef.current);
+        }
+        tileLayerRef.current = layer;
+        contourLayerRef.current = contour || null;
+        setOfflineMapReady(offline);
+        setActivePackName(packName || null);
+        setBasemapError(error || null);
       }
-      if (tileLayerRef.current) {
-        map.removeLayer(tileLayerRef.current);
-      }
-      tileLayerRef.current = layer;
-      setOfflineMapReady(offline);
-      setActivePackName(packName || null);
-      setBasemapError(error || null);
-    });
+    );
     return () => {
       cancelled = true;
     };

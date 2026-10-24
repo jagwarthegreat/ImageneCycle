@@ -1,7 +1,8 @@
 /**
  * Guru-style country map packs (Magene M/N/T).
  * App ships catalog only — country binaries download into Maps Storage (OPFS/custom).
- * Map = PMTiles (OSM/Protomaps); N/T = Magene JSON. Not Guru .vm/.rt/.elv.
+ * Map = PMTiles (OSM/Protomaps); N = Magene JSON; T = topo JSON + contour PMTiles.
+ * Not Guru .vm/.rt/.elv.
  */
 
 import { Capacitor } from '@capacitor/core';
@@ -24,6 +25,28 @@ export interface MapLayerSpec {
   bundled?: boolean;
   /** Guru-style Magene filename stored in Maps Storage */
   fileName?: string;
+  /** Companion contour PMTiles URL (Topographic Data). */
+  contourUrl?: string | null;
+  contourBytes?: number;
+  contourFileName?: string;
+}
+
+/** Parsed magene-topo-v2 (and v1) manifest. */
+export interface TopoManifest {
+  format?: string;
+  id?: string;
+  name?: string;
+  contour?: {
+    url?: string | null;
+    fileName?: string;
+    bytes?: number;
+    dataLayer?: string;
+  };
+  elevation?: {
+    source?: string;
+    demPmtiles?: string | null;
+    demNote?: string;
+  };
 }
 
 export interface MapPackBBox {
@@ -88,6 +111,23 @@ export function layerFileName(pack: MapPackCatalogEntry, layer: MapLayerKind): s
   return `${pack.id} - ${pack.name}.${ext}`;
 }
 
+export function contourFileName(pack: MapPackCatalogEntry): string {
+  const spec = pack.layers.topo;
+  if (spec?.contourFileName) return spec.contourFileName;
+  return `${pack.id} - ${pack.name}.contour.pmtiles`;
+}
+
+export function resolveContourUrl(pack: MapPackCatalogEntry, manifest?: TopoManifest | null): string | null {
+  if (pack.layers.topo?.contourUrl) return pack.layers.topo.contourUrl;
+  if (manifest?.contour?.url) return manifest.contour.url;
+  // Convention: sibling of topo.json under /maps/packs/{slug}.contour.pmtiles
+  const topoUrl = pack.layers.topo?.url;
+  if (topoUrl && topoUrl.endsWith('.topo.json')) {
+    return topoUrl.replace(/\.topo\.json$/i, '.contour.pmtiles');
+  }
+  return null;
+}
+
 /** True when filename looks like a Guru Maps Pro proprietary pack. */
 export function isGuruProprietaryFileName(fileName: string): boolean {
   const n = fileName.toLowerCase();
@@ -103,7 +143,20 @@ export function isGuruProprietaryFileName(fileName: string): boolean {
 
 export function guruUnsupportedMessage(fileName?: string): string {
   const hint = fileName ? ` (${fileName})` : '';
-  return `Guru Maps proprietary pack${hint} is not supported. Download Magene .map.pmtiles / .nav.json / .topo.json from Download Maps (OpenStreetMap / Protomaps).`;
+  return `Guru Maps proprietary pack${hint} is not supported. Download Magene .map.pmtiles / .nav.json / .topo.json (+ contour.pmtiles) from Download Maps (OpenStreetMap / Protomaps).`;
+}
+
+async function assertPmtilesBlob(blob: Blob, label: string): Promise<void> {
+  if (blob.size < PMTILES_MIN_BYTES) throw new Error(`${label} too small to be a valid PMTiles pack.`);
+  const head = await readMagic(blob, 16);
+  if (isGuruProprietaryBlob(blob, head)) throw new Error(guruUnsupportedMessage());
+  if (magicAscii(head, 7) !== 'PMTiles') {
+    const sniff = magicAscii(head, 15).toLowerCase();
+    if (sniff.includes('<!doc') || sniff.includes('<html') || sniff.includes('<!')) {
+      throw new Error(`Server returned a web page instead of ${label}.`);
+    }
+    throw new Error(`Not a valid ${label} (expected PMTiles).`);
+  }
 }
 
 async function readMagic(blob: Blob, n: number): Promise<Uint8Array> {
@@ -134,15 +187,7 @@ export async function validatePackBlob(layer: MapLayerKind, blob: Blob): Promise
   }
 
   if (layer === 'map') {
-    if (blob.size < PMTILES_MIN_BYTES) throw new Error('Map file too small to be a valid PMTiles pack.');
-    if (magicAscii(head, 7) !== 'PMTiles') {
-      // SPA/HTML 200 often starts with <!DOCTYPE or <html
-      const sniff = magicAscii(head, 15).toLowerCase();
-      if (sniff.includes('<!doc') || sniff.includes('<html') || sniff.includes('<!')) {
-        throw new Error('Server returned a web page instead of PMTiles. Host the country pack at the catalog URL.');
-      }
-      throw new Error('Not a valid PMTiles map file (expected OSM/Protomaps extract).');
-    }
+    await assertPmtilesBlob(blob, 'PMTiles map file');
     return;
   }
 
@@ -155,6 +200,10 @@ export async function validatePackBlob(layer: MapLayerKind, blob: Blob): Promise
   } catch {
     throw new Error(`Invalid ${layer} pack — expected Magene JSON.`);
   }
+}
+
+export function parseTopoManifest(blob: Blob): Promise<TopoManifest> {
+  return blob.text().then(text => JSON.parse(text.trim()) as TopoManifest);
 }
 
 async function isValidLocalLayer(fileName: string, layer: MapLayerKind): Promise<boolean> {
@@ -340,6 +389,49 @@ export async function resolveActiveBasemap(
   return null;
 }
 
+async function openLocalPmtiles(fileName: string, cacheId: string): Promise<PMTiles | null> {
+  const cached = pmtilesByKey.get(cacheId);
+  if (cached) return cached;
+
+  const blob = await readPackBlob(fileName);
+  if (!blob || blob.size < PMTILES_MIN_BYTES) return null;
+  try {
+    await assertPmtilesBlob(blob, fileName);
+  } catch {
+    return null;
+  }
+
+  try {
+    const file = asFile(blob, fileName);
+    const pmtiles = new PMTiles(new FileSource(file));
+    await pmtiles.getHeader();
+    pmtilesByKey.set(cacheId, pmtiles);
+    return pmtiles;
+  } catch (err) {
+    console.warn('Failed to open local PMTiles:', fileName, err);
+    clearPmtilesCache(cacheId);
+    return null;
+  }
+}
+
+/** Contour PMTiles for the pack covering lat/lng when Topographic Data is installed. */
+export async function resolveActiveContour(
+  lat: number,
+  lng: number
+): Promise<{ pmtiles: PMTiles; packId: string; packName: string } | null> {
+  const packs = await loadMapCatalog();
+  const covering = packs.filter(p => pointInBBox(lat, lng, p.bbox));
+
+  for (const pack of covering) {
+    if (!(await isLayerInstalled(pack, 'topo'))) continue;
+    const fileName = contourFileName(pack);
+    const key = `magene-map-${pack.id}-contour`;
+    const pmtiles = await openLocalPmtiles(fileName, key);
+    if (pmtiles) return { pmtiles, packId: pack.id, packName: pack.name };
+  }
+  return null;
+}
+
 /** @deprecated use resolveActiveBasemap — blob URLs do not paint PMTiles reliably */
 export async function resolveActiveBasemapUrl(
   lat: number,
@@ -427,6 +519,47 @@ export async function isPackSourceAvailable(url: string): Promise<boolean> {
   return probePackMagicPrefix(url);
 }
 
+async function fetchBlobWithProgress(
+  url: string,
+  signal: AbortSignal,
+  expectedBytes: number,
+  onProgress: ((p: DownloadProgress) => void) | undefined,
+  pctStart: number,
+  pctEnd: number
+): Promise<Blob> {
+  const res = await fetch(url, { signal, cache: 'no-cache' });
+  if (!res.ok) {
+    throw new Error(`Download failed (${res.status}). Check ${url} or your connection.`);
+  }
+  const contentType = (res.headers.get('content-type') || '').toLowerCase();
+  if (contentType.includes('text/html')) {
+    throw new Error(`Server returned a web page instead of pack data (${url}).`);
+  }
+
+  const total = Number(res.headers.get('content-length') || expectedBytes || 0);
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error('Download stream unavailable');
+
+  const chunks: Uint8Array[] = [];
+  let done = 0;
+  const span = Math.max(1, pctEnd - pctStart);
+  while (true) {
+    const { value, done: finished } = await reader.read();
+    if (finished) break;
+    if (value) {
+      chunks.push(value);
+      done += value.length;
+      const frac = total ? Math.min(1, done / total) : 0;
+      onProgress?.({
+        done,
+        total: total || done,
+        pct: pctStart + Math.round(frac * span)
+      });
+    }
+  }
+  return new Blob(chunks as BlobPart[], { type: 'application/octet-stream' });
+}
+
 export async function downloadMapLayer(
   pack: MapPackCatalogEntry,
   layer: MapLayerKind,
@@ -454,67 +587,88 @@ export async function downloadMapLayer(
   const ac = new AbortController();
   abortControllers.set(key, ac);
 
-  const res = await fetch(spec.url, { signal: ac.signal, cache: 'no-cache' });
-  if (!res.ok) {
-    if (layer === 'map') throw new Error(mapPackNotHostedMessage(spec.url));
-    throw new Error(`Download failed (${res.status}). Check ${spec.url} or your connection.`);
-  }
-
-  const contentType = (res.headers.get('content-type') || '').toLowerCase();
-  if (layer === 'map' && contentType.includes('text/html')) {
-    throw new Error(mapPackNotHostedMessage(spec.url));
-  }
-
-  const total = Number(res.headers.get('content-length') || spec.bytes || 0);
-  const reader = res.body?.getReader();
-  if (!reader) throw new Error('Download stream unavailable');
-
-  const chunks: Uint8Array[] = [];
-  let done = 0;
-  while (true) {
-    const { value, done: finished } = await reader.read();
-    if (finished) break;
-    if (value) {
-      chunks.push(value);
-      done += value.length;
-      onProgress?.({
-        done,
-        total: total || done,
-        pct: total ? Math.min(50, Math.round((done / total) * 50)) : 0
-      });
-    }
-  }
-
-  const blob = new Blob(chunks as BlobPart[], { type: 'application/octet-stream' });
   try {
-    await validatePackBlob(layer, blob);
-  } catch (err) {
-    if (layer === 'map') {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('web page') || msg.includes('PMTiles') || msg.includes('HTML')) {
-        throw new Error(mapPackNotHostedMessage(spec.url));
+    const topoShare = layer === 'topo' ? 35 : 50;
+    const blob = await fetchBlobWithProgress(
+      spec.url,
+      ac.signal,
+      spec.bytes || 0,
+      onProgress,
+      0,
+      topoShare
+    );
+
+    try {
+      await validatePackBlob(layer, blob);
+    } catch (err) {
+      if (layer === 'map') {
+        const msg = err instanceof Error ? err.message : '';
+        if (msg.includes('web page') || msg.includes('PMTiles') || msg.includes('HTML')) {
+          throw new Error(mapPackNotHostedMessage(spec.url));
+        }
+      }
+      throw err;
+    }
+
+    await writePackBlob(fileName, blob, pct => {
+      const writeEnd = layer === 'topo' ? 45 : 100;
+      const writeStart = topoShare;
+      onProgress?.({
+        done: blob.size,
+        total: blob.size,
+        pct: writeStart + Math.round((pct / 100) * (writeEnd - writeStart))
+      });
+    });
+
+    let totalBytes = blob.size;
+
+    if (layer === 'topo') {
+      const manifest = await parseTopoManifest(blob);
+      const cUrl = resolveContourUrl(pack, manifest);
+      const cName =
+        manifest.contour?.fileName || pack.layers.topo?.contourFileName || contourFileName(pack);
+      if (cUrl) {
+        const available = await isPackSourceAvailable(cUrl);
+        if (!available) {
+          throw new Error(
+            `Topographic contours not hosted at ${cUrl}. Run npm run maps:contours -- --id=${pack.id} and publish the pack.`
+          );
+        }
+        const cBlob = await fetchBlobWithProgress(
+          cUrl,
+          ac.signal,
+          manifest.contour?.bytes || pack.layers.topo?.contourBytes || 0,
+          onProgress,
+          45,
+          90
+        );
+        await assertPmtilesBlob(cBlob, 'contour PMTiles');
+        await writePackBlob(cName, cBlob, pct => {
+          onProgress?.({
+            done: cBlob.size,
+            total: cBlob.size,
+            pct: 90 + Math.round(pct / 10)
+          });
+        });
+        clearPmtilesCache(`magene-map-${pack.id}-contour`);
+        totalBytes += cBlob.size;
       }
     }
-    throw err;
+
+    clearPmtilesCache(key);
+
+    await metaPut({
+      packId: pack.id,
+      layer,
+      installed: true,
+      bytes: totalBytes,
+      updatedAt: Date.now(),
+      cacheKey: key,
+      fileName
+    });
+  } finally {
+    abortControllers.delete(key);
   }
-
-  await writePackBlob(fileName, blob, pct => {
-    onProgress?.({ done: blob.size, total: blob.size, pct: 50 + Math.round(pct / 2) });
-  });
-
-  clearPmtilesCache(key);
-
-  await metaPut({
-    packId: pack.id,
-    layer,
-    installed: true,
-    bytes: blob.size,
-    updatedAt: Date.now(),
-    cacheKey: key,
-    fileName
-  });
-
-  abortControllers.delete(key);
 }
 
 export function cancelDownload(packId: string, layer: MapLayerKind): void {
@@ -527,6 +681,11 @@ export async function deleteMapLayer(pack: MapPackCatalogEntry, layer: MapLayerK
   const key = cacheKey(pack.id, layer);
   const fileName = layerFileName(pack, layer);
   await deletePackFile(fileName);
+  if (layer === 'topo') {
+    const cName = contourFileName(pack);
+    await deletePackFile(cName);
+    clearPmtilesCache(`magene-map-${pack.id}-contour`);
+  }
   await metaDelete(key);
   clearPmtilesCache(key);
 }
@@ -544,6 +703,10 @@ export function packTotalBytes(pack: MapPackCatalogEntry): number {
   if (pack.layers.map?.bytes) n += pack.layers.map.bytes;
   if (pack.layers.navigation?.bytes) n += pack.layers.navigation.bytes;
   if (pack.layers.topo?.bytes) n += pack.layers.topo.bytes;
+  // topo.bytes should already include contour; add contourBytes only if topo.bytes omitted it
+  if (pack.layers.topo?.contourBytes && !pack.layers.topo?.bytes) {
+    n += pack.layers.topo.contourBytes;
+  }
   return n;
 }
 

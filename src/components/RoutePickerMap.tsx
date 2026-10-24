@@ -1,10 +1,11 @@
 import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { leafletLayer } from 'protomaps-leaflet';
 import { LatLng } from '../utils/routeEncode';
 import { RoutePoint } from '../types/cycling';
-import { resolveActiveBasemap } from '../utils/mapPacks';
+import { resolveActiveBasemap, resolveActiveContour } from '../utils/mapPacks';
+import { createContourOverlayLayer } from '../utils/contourOverlay';
+import { createOfflineBasemapLayer, loadMapDetailsPref } from '../utils/offlineMapStyle';
 
 export type PinMode = 'start' | 'dest' | 'via';
 
@@ -62,17 +63,32 @@ export const RoutePickerMap: React.FC<RoutePickerMapProps> = ({
       attributionControl: false
     });
 
-    void resolveActiveBasemap(center.lat || 14.6, center.lng || 121).then(active => {
+    void (async () => {
+      if (!mapRef.current) return;
+      const lat = center.lat || 14.6;
+      const lng = center.lng || 121;
+      const active = await resolveActiveBasemap(lat, lng);
       if (!mapRef.current) return;
       if (active?.pmtiles) {
         try {
-          const layer = leafletLayer({
-            url: active.pmtiles as unknown as string,
-            flavor: 'light',
-            lang: 'en',
-            attribution: '© OpenStreetMap · Protomaps'
-          }) as unknown as L.Layer;
+          const details = loadMapDetailsPref();
+          const layer = createOfflineBasemapLayer({
+            pmtiles: active.pmtiles,
+            isDarkMode: false,
+            details
+          });
           layer.addTo(map);
+          try {
+            const topo = await resolveActiveContour(lat, lng);
+            if (topo?.pmtiles && mapRef.current) {
+              createContourOverlayLayer({
+                pmtiles: topo.pmtiles,
+                isDarkMode: false
+              }).addTo(map);
+            }
+          } catch {
+            /* contours optional */
+          }
           return;
         } catch {
           /* fall through to world overview */
@@ -81,7 +97,7 @@ export const RoutePickerMap: React.FC<RoutePickerMapProps> = ({
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19
       }).addTo(map);
-    });
+    })();
 
     map.on('click', (e: L.LeafletMouseEvent) => {
       onClickRef.current({ lat: e.latlng.lat, lng: e.latlng.lng });

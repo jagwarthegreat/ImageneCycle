@@ -1,0 +1,20 @@
+{
+  "format": "magene-nav-v1",
+  "id": "vn",
+  "name": "Vietnam",
+  "fileHint": "vn - Vietnam.nav.json",
+  "bbox": {
+    "minLat": 8,
+    "maxLat": 23.5,
+    "minLng": 102,
+    "maxLng": 110
+  },
+  "routing": {
+    "offlineRouterGraph": false,
+    "note": "Create routes online; saved turn-by-turn works offline."
+  },
+  "notes": [
+    "Magene Navigation Data pack (not Guru .rt)."
+  ],
+  "updatedAt": "2026-10-24"
+}

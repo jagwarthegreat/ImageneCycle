@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "worldBasemap": "online",
   "packs": [
     {
@@ -9,7 +9,7 @@
       "layers": {
         "map": {
           "url": "/maps/packs/philippines.pmtiles",
-          "bytes": 760747052,
+          "bytes": 760922362,
           "label": "Map",
           "fileName": "ph - Philippines.map.pmtiles"
         },
@@ -22,10 +22,13 @@
         },
         "topo": {
           "url": "/maps/packs/philippines.topo.json",
-          "bytes": 900,
+          "bytes": 12342000,
           "label": "Topographic Data",
           "fileName": "ph - Philippines.topo.json",
-          "note": "Topo pack. Elev primarily from saved routes; optional DEM when hosted."
+          "note": "Contour lines offline. Elev primarily from saved routes.",
+          "contourUrl": "/maps/packs/philippines.contour.pmtiles",
+          "contourBytes": 12339737,
+          "contourFileName": "ph - Philippines.contour.pmtiles"
         }
       }
     },
@@ -49,9 +52,13 @@
         },
         "topo": {
           "url": "/maps/packs/vietnam.topo.json",
-          "bytes": 900,
+          "bytes": 10000000,
           "label": "Topographic Data",
-          "fileName": "vn - Vietnam.topo.json"
+          "fileName": "vn - Vietnam.topo.json",
+          "note": "Contour lines offline when hosted.",
+          "contourUrl": "/maps/packs/vietnam.contour.pmtiles",
+          "contourBytes": 10000000,
+          "contourFileName": "vn - Vietnam.contour.pmtiles"
         }
       }
     },
@@ -75,9 +82,12 @@
         },
         "topo": {
           "url": "/maps/packs/singapore.topo.json",
-          "bytes": 700,
+          "bytes": 2000000,
           "label": "Topographic Data",
-          "fileName": "sg - Singapore.topo.json"
+          "fileName": "sg - Singapore.topo.json",
+          "contourUrl": "/maps/packs/singapore.contour.pmtiles",
+          "contourBytes": 2000000,
+          "contourFileName": "sg - Singapore.contour.pmtiles"
         }
       }
     },
@@ -101,9 +111,12 @@
         },
         "topo": {
           "url": "/maps/packs/malaysia.topo.json",
-          "bytes": 900,
+          "bytes": 11000000,
           "label": "Topographic Data",
-          "fileName": "my - Malaysia.topo.json"
+          "fileName": "my - Malaysia.topo.json",
+          "contourUrl": "/maps/packs/malaysia.contour.pmtiles",
+          "contourBytes": 11000000,
+          "contourFileName": "my - Malaysia.contour.pmtiles"
         }
       }
     },
@@ -127,9 +140,12 @@
         },
         "topo": {
           "url": "/maps/packs/indonesia.topo.json",
-          "bytes": 1000,
+          "bytes": 18000000,
           "label": "Topographic Data",
-          "fileName": "id - Indonesia.topo.json"
+          "fileName": "id - Indonesia.topo.json",
+          "contourUrl": "/maps/packs/indonesia.contour.pmtiles",
+          "contourBytes": 18000000,
+          "contourFileName": "id - Indonesia.contour.pmtiles"
         }
       }
     },
@@ -153,9 +169,12 @@
         },
         "topo": {
           "url": "/maps/packs/taiwan.topo.json",
-          "bytes": 800,
+          "bytes": 6000000,
           "label": "Topographic Data",
-          "fileName": "tw - Taiwan.topo.json"
+          "fileName": "tw - Taiwan.topo.json",
+          "contourUrl": "/maps/packs/taiwan.contour.pmtiles",
+          "contourBytes": 6000000,
+          "contourFileName": "tw - Taiwan.contour.pmtiles"
         }
       }
     },
@@ -179,9 +198,12 @@
         },
         "topo": {
           "url": "/maps/packs/brunei.topo.json",
-          "bytes": 600,
+          "bytes": 814000,
           "label": "Topographic Data",
-          "fileName": "bn - Brunei.topo.json"
+          "fileName": "bn - Brunei.topo.json",
+          "contourUrl": "/maps/packs/brunei.contour.pmtiles",
+          "contourBytes": 812464,
+          "contourFileName": "bn - Brunei.contour.pmtiles"
         }
       }
     }

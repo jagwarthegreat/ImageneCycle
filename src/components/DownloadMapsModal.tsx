@@ -177,7 +177,7 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
         </div>
 
         <p className="px-4 pt-2 text-[10px] text-zinc-500 font-sports leading-relaxed">
-          OpenStreetMap packs (M = map, N = routing, T = topo). Install to this phone for offline rides.
+          OpenStreetMap packs (M = map, N = routing, T = topo + contours). Install to this phone for offline rides.
           Philippines map can install from the app bundle when included. Guru .vm / .rt / .elv are not supported.
         </p>
 

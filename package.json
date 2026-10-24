@@ -12,6 +12,10 @@
     "lint": "tsc --noEmit",
     "maps:ph": "node scripts/fetch-philippines-map.mjs",
     "maps:sh": "node scripts/fetch-philippines-map.mjs",
+    "maps:extract": "node scripts/fetch-country-map.mjs",
+    "maps:contours": "node scripts/build-contour-pack.mjs",
+    "maps:stubs": "node scripts/write-sea-pack-stubs.mjs",
+    "maps:verify": "node scripts/verify-offline-maps.mjs",
     "icons:gen": "node scripts/generate-app-icons.mjs"
   },
   "dependencies": {
@@ -47,9 +51,12 @@
     "@types/web-bluetooth": "^0.0.21",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
+    "geojson-vt": "^5.0.4",
     "sharp": "^0.35.5",
+    "sql.js": "^1.15.1",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vt-pbf": "^3.1.3"
   }
 }
