@@ -8,11 +8,17 @@ import {
   CornerUpRight,
   ArrowUp,
   Flag,
-  MapPin
+  MapPin,
+  Plus,
+  Trash2,
+  ChevronUp,
+  ChevronDown
 } from 'lucide-react';
 import { RouteData, RouteTurn } from '../types/cycling';
 import { evaluateRouteFromEndpoints, LatLng } from '../utils/routeEncode';
 import { RoutePickerMap, PinMode } from './RoutePickerMap';
+
+const MAX_VIAS = 8;
 
 interface RouteBuilderModalProps {
   isOpen: boolean;
@@ -37,6 +43,11 @@ function TurnIcon({ turn }: { turn: RouteTurn }) {
   return <ArrowUp className="w-3.5 h-3.5 text-zinc-400 shrink-0" />;
 }
 
+function fmtCoord(ll: LatLng | null): string {
+  if (!ll) return 'tap map';
+  return `${ll.lat.toFixed(4)}, ${ll.lng.toFixed(4)}`;
+}
+
 export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
   isOpen,
   onClose,
@@ -48,6 +59,8 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
   const [pinMode, setPinMode] = useState<PinMode>('start');
   const [start, setStart] = useState<LatLng | null>(null);
   const [dest, setDest] = useState<LatLng | null>(null);
+  const [vias, setVias] = useState<LatLng[]>([]);
+  const [replaceViaIndex, setReplaceViaIndex] = useState<number | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [usedOsrm, setUsedOsrm] = useState<boolean | null>(null);
@@ -61,6 +74,8 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
         : null
     );
     setDest(null);
+    setVias([]);
+    setReplaceViaIndex(null);
     setRoute(null);
     setError(null);
     setUsedOsrm(null);
@@ -69,11 +84,12 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
   }, [isOpen]);
 
   const runEvaluate = useCallback(
-    async (s: LatLng, d: LatLng) => {
+    async (s: LatLng, d: LatLng, viaList: LatLng[]) => {
       setEvaluating(true);
       setError(null);
       try {
-        const result = await evaluateRouteFromEndpoints(name.trim() || 'My Route', [s, d]);
+        const waypoints = [s, ...viaList, d];
+        const result = await evaluateRouteFromEndpoints(name.trim() || 'My Route', waypoints);
         setRoute(result.route);
         setUsedOsrm(result.usedOsrm);
       } catch (err) {
@@ -86,42 +102,86 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
     [name]
   );
 
+  const maybeEvaluate = (s: LatLng | null, d: LatLng | null, viaList: LatLng[]) => {
+    if (s && d) void runEvaluate(s, d, viaList);
+  };
+
   const handleMapClick = (ll: LatLng) => {
     if (pinMode === 'start') {
       setStart(ll);
       setRoute(null);
-      setPinMode('dest');
-      if (dest) {
-        void runEvaluate(ll, dest);
-      }
-    } else {
-      setDest(ll);
-      setRoute(null);
-      if (start) {
-        void runEvaluate(start, ll);
-      }
+      setPinMode(dest ? (vias.length < MAX_VIAS ? 'via' : 'dest') : 'dest');
+      maybeEvaluate(ll, dest, vias);
+      return;
     }
+
+    if (pinMode === 'via') {
+      if (replaceViaIndex != null && replaceViaIndex >= 0 && replaceViaIndex < vias.length) {
+        const next = [...vias];
+        next[replaceViaIndex] = ll;
+        setVias(next);
+        setReplaceViaIndex(null);
+        setRoute(null);
+        maybeEvaluate(start, dest, next);
+        return;
+      }
+      if (vias.length >= MAX_VIAS) {
+        setError(`Maximum ${MAX_VIAS} via points`);
+        return;
+      }
+      const next = [...vias, ll];
+      setVias(next);
+      setRoute(null);
+      maybeEvaluate(start, dest, next);
+      return;
+    }
+
+    // dest
+    setDest(ll);
+    setRoute(null);
+    maybeEvaluate(start, ll, vias);
   };
 
   const handleSwap = () => {
     if (!start && !dest) return;
     const nextStart = dest;
     const nextDest = start;
+    const nextVias = [...vias].reverse();
     setStart(nextStart);
     setDest(nextDest);
+    setVias(nextVias);
     setRoute(null);
-    if (nextStart && nextDest) {
-      void runEvaluate(nextStart, nextDest);
-    }
+    maybeEvaluate(nextStart, nextDest, nextVias);
   };
 
   const handleReEvaluate = () => {
-    if (start && dest) void runEvaluate(start, dest);
+    if (start && dest) void runEvaluate(start, dest, vias);
+  };
+
+  const removeVia = (index: number) => {
+    const next = vias.filter((_, i) => i !== index);
+    setVias(next);
+    setReplaceViaIndex(null);
+    setRoute(null);
+    maybeEvaluate(start, dest, next);
+  };
+
+  const moveVia = (index: number, dir: -1 | 1) => {
+    const j = index + dir;
+    if (j < 0 || j >= vias.length) return;
+    const next = [...vias];
+    const tmp = next[index];
+    next[index] = next[j];
+    next[j] = tmp;
+    setVias(next);
+    setRoute(null);
+    maybeEvaluate(start, dest, next);
   };
 
   if (!isOpen) return null;
 
   const turns = route?.turns || [];
+  const canAddVia = !!start && vias.length < MAX_VIAS;
 
   return (
     <div className="fixed inset-0 z-[99999] flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-xs p-0 sm:p-3">
@@ -152,14 +212,32 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => setPinMode('start')}
+              onClick={() => {
+                setPinMode('start');
+                setReplaceViaIndex(null);
+              }}
               className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold border ${
                 pinMode === 'start'
                   ? 'bg-emerald-600 border-emerald-500 text-white'
                   : 'bg-zinc-950 border-zinc-700 text-zinc-400'
               }`}
             >
-              Set Start (A)
+              Start
+            </button>
+            <button
+              type="button"
+              disabled={!canAddVia && pinMode !== 'via'}
+              onClick={() => {
+                setPinMode('via');
+                setReplaceViaIndex(null);
+              }}
+              className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold border disabled:opacity-40 ${
+                pinMode === 'via'
+                  ? 'bg-blue-600 border-blue-500 text-white'
+                  : 'bg-zinc-950 border-zinc-700 text-zinc-400'
+              }`}
+            >
+              Via
             </button>
             <button
               type="button"
@@ -171,34 +249,23 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setPinMode('dest')}
+              onClick={() => {
+                setPinMode('dest');
+                setReplaceViaIndex(null);
+              }}
               className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold border ${
                 pinMode === 'dest'
                   ? 'bg-red-600 border-red-500 text-white'
                   : 'bg-zinc-950 border-zinc-700 text-zinc-400'
               }`}
             >
-              Set Dest (B)
+              Dest
             </button>
-          </div>
-          <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500">
-            <span>
-              A:{' '}
-              {start
-                ? `${start.lat.toFixed(4)}, ${start.lng.toFixed(4)}`
-                : 'tap map'}
-            </span>
-            <span>
-              B:{' '}
-              {dest
-                ? `${dest.lat.toFixed(4)}, ${dest.lng.toFixed(4)}`
-                : 'tap map'}
-            </span>
           </div>
         </div>
 
         {/* Map */}
-        <div className="h-[38%] min-h-[200px] shrink-0 border-b border-zinc-800 relative">
+        <div className="h-[34%] min-h-[180px] shrink-0 border-b border-zinc-800 relative">
           <RoutePickerMap
             center={{
               lat: currentCoords.lat || 10.67,
@@ -206,6 +273,7 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
             }}
             start={start}
             dest={dest}
+            vias={vias}
             routePoints={route?.points || []}
             pinMode={pinMode}
             onMapClick={handleMapClick}
@@ -220,7 +288,7 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
           )}
         </div>
 
-        {/* Summary + turns */}
+        {/* Waypoint list + summary + turns */}
         <div className="flex-1 overflow-y-auto p-2.5 space-y-2 text-xs font-sports min-h-0">
           {error && (
             <div className="text-red-400 bg-red-950/40 border border-red-800/50 rounded-lg px-2.5 py-2 text-[11px]">
@@ -228,17 +296,126 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
             </div>
           )}
 
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-zinc-400 uppercase font-bold">Waypoints</span>
+              <button
+                type="button"
+                disabled={!canAddVia}
+                onClick={() => {
+                  setPinMode('via');
+                  setReplaceViaIndex(null);
+                }}
+                className="flex items-center gap-1 text-[10px] font-bold text-blue-400 disabled:opacity-40"
+              >
+                <Plus className="w-3 h-3" />
+                Add via
+              </button>
+            </div>
+
+            <div className="space-y-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setPinMode('start');
+                  setReplaceViaIndex(null);
+                }}
+                className={`w-full flex items-center gap-2 rounded-lg px-2 py-1.5 border text-left ${
+                  pinMode === 'start'
+                    ? 'border-emerald-500 bg-emerald-950/40'
+                    : 'border-zinc-800 bg-zinc-950'
+                }`}
+              >
+                <span className="w-5 h-5 rounded-full bg-emerald-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                  A
+                </span>
+                <span className="font-mono text-[11px] text-zinc-300 truncate">{fmtCoord(start)}</span>
+              </button>
+
+              {vias.map((v, i) => (
+                <div
+                  key={`via-${i}-${v.lat}-${v.lng}`}
+                  className={`flex items-center gap-1 rounded-lg px-1.5 py-1 border ${
+                    pinMode === 'via' && replaceViaIndex === i
+                      ? 'border-blue-500 bg-blue-950/40'
+                      : 'border-zinc-800 bg-zinc-950'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPinMode('via');
+                      setReplaceViaIndex(i);
+                    }}
+                    className="flex-1 flex items-center gap-2 min-w-0 text-left px-1 py-0.5"
+                  >
+                    <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                      {i + 1}
+                    </span>
+                    <span className="font-mono text-[11px] text-zinc-300 truncate">{fmtCoord(v)}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveVia(i, -1)}
+                    disabled={i === 0}
+                    className="p-1 text-zinc-500 hover:text-white disabled:opacity-30"
+                    aria-label="Move via up"
+                  >
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveVia(i, 1)}
+                    disabled={i === vias.length - 1}
+                    className="p-1 text-zinc-500 hover:text-white disabled:opacity-30"
+                    aria-label="Move via down"
+                  >
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeVia(i)}
+                    className="p-1 text-zinc-500 hover:text-rose-400"
+                    aria-label={`Remove via ${i + 1}`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setPinMode('dest');
+                  setReplaceViaIndex(null);
+                }}
+                className={`w-full flex items-center gap-2 rounded-lg px-2 py-1.5 border text-left ${
+                  pinMode === 'dest'
+                    ? 'border-red-500 bg-red-950/40'
+                    : 'border-zinc-800 bg-zinc-950'
+                }`}
+              >
+                <span className="w-5 h-5 rounded-full bg-red-600 text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+                  B
+                </span>
+                <span className="font-mono text-[11px] text-zinc-300 truncate">{fmtCoord(dest)}</span>
+              </button>
+            </div>
+          </div>
+
           {route && (
             <>
               <div className="flex items-center justify-between">
                 <span className="font-bold text-emerald-400 uppercase text-[10px]">
                   {usedOsrm
                     ? `OSRM bike route${
+                        vias.length ? ` · ${vias.length} via` : ''
+                      }${
                         route.alternatives?.length
                           ? ` + ${route.alternatives.length} alt TBT`
                           : ''
                       }`
-                    : 'Straight-line fallback'}
+                    : 'Route ready'}
                 </span>
                 <button
                   type="button"
@@ -271,10 +448,10 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
                 </span>
                 {turns.length === 0 ? (
                   <div className="text-[11px] text-zinc-500 py-2">
-                    No turn instructions (path may be a straight-line fallback).
+                    No turn instructions for this route.
                   </div>
                 ) : (
-                  <div className="space-y-0.5 max-h-48 overflow-y-auto pr-0.5">
+                  <div className="space-y-0.5 max-h-40 overflow-y-auto pr-0.5">
                     {turns.map(t => (
                       <div
                         key={t.index}
@@ -299,9 +476,10 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
 
           {!route && !evaluating && (
             <p className="text-[11px] text-zinc-500 leading-relaxed">
-              Tap the map to place <span className="text-emerald-400 font-bold">Start (A)</span>, then{' '}
-              <span className="text-red-400 font-bold">Destination (B)</span>. The bike route and
-              turn-by-turn list will load automatically.
+              Place <span className="text-emerald-400 font-bold">Start</span> and{' '}
+              <span className="text-red-400 font-bold">Dest</span>, then add{' '}
+              <span className="text-blue-400 font-bold">Via</span> points to shape the course.
+              Routing and turn-by-turn need internet when creating; saved routes work offline.
             </p>
           )}
         </div>

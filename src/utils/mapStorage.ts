@@ -229,6 +229,36 @@ export async function writePackBlob(
   }
 }
 
+/** Write binary chunks without buffering the whole file as a Blob first. */
+export async function writePackChunks(
+  fileName: string,
+  chunks: AsyncIterable<Uint8Array>,
+  expectedBytes?: number,
+  onProgress?: (pct: number) => void
+): Promise<number> {
+  const dir = await getActiveDir();
+  const fh = await dir.getFileHandle(fileName, { create: true });
+  const writable = await fh.createWritable();
+  let written = 0;
+  try {
+    for await (const chunk of chunks) {
+      if (!chunk?.byteLength) continue;
+      // Copy into ArrayBuffer-backed view for FileSystemWritableFileStream typings
+      const copy = new Uint8Array(chunk.byteLength);
+      copy.set(chunk);
+      await writable.write(copy);
+      written += chunk.byteLength;
+      if (expectedBytes && expectedBytes > 0) {
+        onProgress?.(Math.min(100, Math.round((written / expectedBytes) * 100)));
+      }
+    }
+    onProgress?.(100);
+  } finally {
+    await writable.close();
+  }
+  return written;
+}
+
 export async function readPackBlob(fileName: string, mode = getStorageMode()): Promise<Blob | null> {
   try {
     let dir: FileSystemDirectoryHandle;

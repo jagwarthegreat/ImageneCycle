@@ -114,17 +114,35 @@ export const ClimbProElevationChart: React.FC<ClimbProElevationChartProps> = ({
 
   if (profilePoints.length < 2) {
     return (
-      <div className={`w-full flex flex-col justify-between px-3 py-2 select-none ${isDarkMode ? 'bg-zinc-950 text-zinc-400' : 'bg-white text-zinc-500'}`}>
-        <div className="flex items-center justify-between text-[10px] font-sports uppercase tracking-wider font-semibold">
+      <div
+        className={`w-full min-h-[140px] flex flex-col justify-between px-3 py-3 select-none ${
+          isDarkMode ? 'bg-zinc-950 text-zinc-300' : 'bg-white text-zinc-600'
+        }`}
+      >
+        <div
+          className={`flex items-center justify-between text-[11px] sm:text-xs font-sports uppercase tracking-wide font-bold ${
+            isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+          }`}
+        >
           <span>Climb Profile</span>
           <span>No Active Climb</span>
         </div>
-        <div className="h-16 flex items-center justify-center text-xs opacity-60">
+        <div
+          className={`flex items-center justify-center py-5 text-sm sm:text-base font-sports font-semibold text-center px-2 ${
+            isDarkMode ? 'text-zinc-300' : 'text-zinc-600'
+          }`}
+        >
           Flat Terrain / Approaching Route Climb
         </div>
-        <div className="flex items-center justify-between text-xs border-t border-zinc-200/50 pt-1 font-sports">
+        <div
+          className={`flex items-center justify-between text-[11px] sm:text-xs border-t pt-2 font-sports font-bold uppercase ${
+            isDarkMode ? 'border-zinc-800 text-zinc-400' : 'border-zinc-200 text-zinc-500'
+          }`}
+        >
           <span>AVG GRADE REMAIN.</span>
-          <span className="font-bold text-sm">0.0%</span>
+          <span className={`font-digital font-bold text-base ${isDarkMode ? 'text-zinc-200' : 'text-zinc-800'}`}>
+            0.0%
+          </span>
         </div>
       </div>
     );

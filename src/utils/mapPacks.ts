@@ -1,17 +1,21 @@
 /**
  * Guru-style country map packs (Magene M/N/T).
- * App ships catalog only — country binaries download into Maps Storage (OPFS/custom).
+ * App ships catalog only — country binaries install from local {slug}-maps.zip into Maps Storage.
  * Map = PMTiles (OSM/Protomaps); N = Magene JSON; T = topo JSON + contour PMTiles.
  * Not Guru .vm/.rt/.elv.
  */
 
 import { Capacitor } from '@capacitor/core';
 import { FileSource, PMTiles } from 'pmtiles';
+import { deletePackFile, readPackBlob } from './mapStorage';
 import {
-  deletePackFile,
-  readPackBlob,
-  writePackBlob
-} from './mapStorage';
+  extractEntriesFromZipSource,
+  resolveZipSource,
+  slugFromPackUrl,
+  zipEntryNames,
+  type NeededZipEntry,
+  type ZipSource
+} from './mapZipInstall';
 
 export type MapLayerKind = 'map' | 'navigation' | 'topo';
 
@@ -79,7 +83,7 @@ export interface LayerInstallState {
   fileName: string;
 }
 
-const CATALOG_URL = '/maps/catalog.json';
+const DEFAULT_CATALOG_URL = '/maps/catalog.json';
 const IDB_NAME = 'magene-map-packs-meta';
 const IDB_STORE = 'layers';
 const IDB_VERSION = 2;
@@ -89,6 +93,54 @@ let catalogCache: MapPackCatalogEntry[] | null = null;
 /** Cached PMTiles readers (FileSource over OPFS File — works offline). */
 const pmtilesByKey = new Map<string, PMTiles>();
 const abortControllers = new Map<string, AbortController>();
+
+/** Public Storage / CDN root (no trailing slash), e.g. Supabase map-packs bucket. */
+export function mapPackBaseUrl(): string {
+  const raw = (import.meta.env.VITE_MAP_PACK_BASE_URL as string | undefined)?.trim() || '';
+  return raw.replace(/\/$/, '');
+}
+
+/** Catalog fetch URL — optional remote Edge Function; else bundled /maps/catalog.json. */
+export function catalogUrl(): string {
+  const remote = (import.meta.env.VITE_MAP_CATALOG_URL as string | undefined)?.trim();
+  if (remote) return remote;
+  return DEFAULT_CATALOG_URL;
+}
+
+/**
+ * Resolve catalog-relative pack URLs against VITE_MAP_PACK_BASE_URL.
+ * Absolute http(s) URLs are left unchanged; without a base URL, relative paths stay same-origin.
+ */
+export function resolvePackUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  const base = mapPackBaseUrl();
+  if (!base) return trimmed;
+  const path = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return `${base}${path}`;
+}
+
+function rewriteLayerUrls(spec: MapLayerSpec | undefined): MapLayerSpec | undefined {
+  if (!spec) return spec;
+  return {
+    ...spec,
+    url: resolvePackUrl(spec.url),
+    contourUrl: resolvePackUrl(spec.contourUrl ?? null) ?? undefined
+  };
+}
+
+function rewriteCatalogPack(pack: MapPackCatalogEntry): MapPackCatalogEntry {
+  return {
+    ...pack,
+    layers: {
+      map: rewriteLayerUrls(pack.layers.map)!,
+      navigation: rewriteLayerUrls(pack.layers.navigation),
+      topo: rewriteLayerUrls(pack.layers.topo)
+    }
+  };
+}
 
 function clearPmtilesCache(key: string): void {
   pmtilesByKey.delete(key);
@@ -117,13 +169,38 @@ export function contourFileName(pack: MapPackCatalogEntry): string {
   return `${pack.id} - ${pack.name}.contour.pmtiles`;
 }
 
+/** Catalog URL basename slug, e.g. philippines from …/philippines.pmtiles */
+export function packSlug(pack: MapPackCatalogEntry): string {
+  return slugFromPackUrl(pack.layers.map?.url, pack.name || pack.id);
+}
+
+function neededZipEntriesForLayer(pack: MapPackCatalogEntry, layer: MapLayerKind): NeededZipEntry[] {
+  const names = zipEntryNames(packSlug(pack));
+  if (layer === 'map') {
+    return [{ zipName: names.map, storageName: layerFileName(pack, 'map'), kind: 'pmtiles' }];
+  }
+  if (layer === 'navigation') {
+    return [
+      {
+        zipName: names.navigation,
+        storageName: layerFileName(pack, 'navigation'),
+        kind: 'json'
+      }
+    ];
+  }
+  return [
+    { zipName: names.topo, storageName: layerFileName(pack, 'topo'), kind: 'json' },
+    { zipName: names.contour, storageName: contourFileName(pack), kind: 'pmtiles' }
+  ];
+}
+
 export function resolveContourUrl(pack: MapPackCatalogEntry, manifest?: TopoManifest | null): string | null {
-  if (pack.layers.topo?.contourUrl) return pack.layers.topo.contourUrl;
-  if (manifest?.contour?.url) return manifest.contour.url;
+  if (pack.layers.topo?.contourUrl) return resolvePackUrl(pack.layers.topo.contourUrl);
+  if (manifest?.contour?.url) return resolvePackUrl(manifest.contour.url);
   // Convention: sibling of topo.json under /maps/packs/{slug}.contour.pmtiles
   const topoUrl = pack.layers.topo?.url;
-  if (topoUrl && topoUrl.endsWith('.topo.json')) {
-    return topoUrl.replace(/\.topo\.json$/i, '.contour.pmtiles');
+  if (topoUrl && /\.topo\.json$/i.test(topoUrl)) {
+    return resolvePackUrl(topoUrl.replace(/\.topo\.json$/i, '.contour.pmtiles'));
   }
   return null;
 }
@@ -268,12 +345,12 @@ async function metaDelete(key: string): Promise<void> {
 
 export async function loadMapCatalog(force = false): Promise<MapPackCatalogEntry[]> {
   if (!force && catalogCache) return catalogCache;
-  const res = await fetch(CATALOG_URL, { cache: 'no-cache' });
+  const res = await fetch(catalogUrl(), { cache: 'no-cache' });
   if (!res.ok) throw new Error('Failed to load map catalog');
   const data = await res.json();
   const packs: MapPackCatalogEntry[] = Array.isArray(data.packs) ? data.packs : [];
-  catalogCache = packs;
-  return packs;
+  catalogCache = packs.map(rewriteCatalogPack);
+  return catalogCache;
 }
 
 export function pointInBBox(lat: number, lng: number, bbox: MapPackBBox): boolean {
@@ -447,9 +524,9 @@ export type DownloadProgress = { done: number; total: number; pct: number };
 
 export function mapPackNotHostedMessage(url: string): string {
   if (Capacitor.isNativePlatform()) {
-    return `Map pack not in this app build (${url}). Philippines installs from the bundled file when present; other countries need cloud hosting later.`;
+    return `Map packs install from a local zip on this phone (Download/ImageneCycle), not from the network (${url}).`;
   }
-  return `Map pack not available at ${url}. For local web, place the .pmtiles under public/maps/packs/ (npm run maps:ph).`;
+  return `Map packs install from a local zip (Browse). Optional CDN URL unused for install: ${url}`;
 }
 
 function looksLikePmtilesUrl(url: string): boolean {
@@ -519,55 +596,18 @@ export async function isPackSourceAvailable(url: string): Promise<boolean> {
   return probePackMagicPrefix(url);
 }
 
-async function fetchBlobWithProgress(
-  url: string,
-  signal: AbortSignal,
-  expectedBytes: number,
-  onProgress: ((p: DownloadProgress) => void) | undefined,
-  pctStart: number,
-  pctEnd: number
-): Promise<Blob> {
-  const res = await fetch(url, { signal, cache: 'no-cache' });
-  if (!res.ok) {
-    throw new Error(`Download failed (${res.status}). Check ${url} or your connection.`);
-  }
-  const contentType = (res.headers.get('content-type') || '').toLowerCase();
-  if (contentType.includes('text/html')) {
-    throw new Error(`Server returned a web page instead of pack data (${url}).`);
-  }
-
-  const total = Number(res.headers.get('content-length') || expectedBytes || 0);
-  const reader = res.body?.getReader();
-  if (!reader) throw new Error('Download stream unavailable');
-
-  const chunks: Uint8Array[] = [];
-  let done = 0;
-  const span = Math.max(1, pctEnd - pctStart);
-  while (true) {
-    const { value, done: finished } = await reader.read();
-    if (finished) break;
-    if (value) {
-      chunks.push(value);
-      done += value.length;
-      const frac = total ? Math.min(1, done / total) : 0;
-      onProgress?.({
-        done,
-        total: total || done,
-        pct: pctStart + Math.round(frac * span)
-      });
-    }
-  }
-  return new Blob(chunks as BlobPart[], { type: 'application/octet-stream' });
-}
-
-export async function downloadMapLayer(
+/**
+ * Install a layer from local {slug}-maps.zip (Download/ImageneCycle scan or Browse File).
+ */
+export async function installMapLayerFromZip(
   pack: MapPackCatalogEntry,
   layer: MapLayerKind,
+  opts?: { file?: File | null; source?: ZipSource },
   onProgress?: (p: DownloadProgress) => void
 ): Promise<void> {
   const spec = pack.layers[layer];
-  if (!spec?.url || spec.infoOnly) {
-    throw new Error('This layer is not available for download.');
+  if (!spec || spec.infoOnly) {
+    throw new Error('This layer is not available for install.');
   }
 
   const key = cacheKey(pack.id, layer);
@@ -576,85 +616,31 @@ export async function downloadMapLayer(
     throw new Error(guruUnsupportedMessage(fileName));
   }
 
-  if (layer === 'map') {
-    const available = await isPackSourceAvailable(spec.url);
-    if (!available) {
-      throw new Error(mapPackNotHostedMessage(spec.url));
-    }
-  }
-
   abortControllers.get(key)?.abort();
   const ac = new AbortController();
   abortControllers.set(key, ac);
 
   try {
-    const topoShare = layer === 'topo' ? 35 : 50;
-    const blob = await fetchBlobWithProgress(
-      spec.url,
-      ac.signal,
-      spec.bytes || 0,
-      onProgress,
-      0,
-      topoShare
-    );
+    const slug = packSlug(pack);
+    const source = opts?.source || (await resolveZipSource(slug, opts?.file));
+    const entries = neededZipEntriesForLayer(pack, layer);
+    const written = await extractEntriesFromZipSource(source, entries, onProgress, ac.signal);
 
-    try {
-      await validatePackBlob(layer, blob);
-    } catch (err) {
-      if (layer === 'map') {
-        const msg = err instanceof Error ? err.message : '';
-        if (msg.includes('web page') || msg.includes('PMTiles') || msg.includes('HTML')) {
-          throw new Error(mapPackNotHostedMessage(spec.url));
-        }
-      }
-      throw err;
+    let totalBytes = 0;
+    for (const n of written.values()) totalBytes += n;
+
+    if (!written.has(fileName)) {
+      throw new Error(`Zip did not contain the files needed for ${spec.label}.`);
     }
 
-    await writePackBlob(fileName, blob, pct => {
-      const writeEnd = layer === 'topo' ? 45 : 100;
-      const writeStart = topoShare;
-      onProgress?.({
-        done: blob.size,
-        total: blob.size,
-        pct: writeStart + Math.round((pct / 100) * (writeEnd - writeStart))
-      });
-    });
-
-    let totalBytes = blob.size;
+    // Re-validate installed bytes against layer rules
+    const installedBlob = await readPackBlob(fileName);
+    if (!installedBlob) throw new Error(`Failed to write ${fileName}`);
+    await validatePackBlob(layer, installedBlob);
 
     if (layer === 'topo') {
-      const manifest = await parseTopoManifest(blob);
-      const cUrl = resolveContourUrl(pack, manifest);
-      const cName =
-        manifest.contour?.fileName || pack.layers.topo?.contourFileName || contourFileName(pack);
-      if (cUrl) {
-        const available = await isPackSourceAvailable(cUrl);
-        if (!available) {
-          throw new Error(
-            `Topographic contours not hosted at ${cUrl}. Run npm run maps:contours -- --id=${pack.id} and publish the pack.`
-          );
-        }
-        const cBlob = await fetchBlobWithProgress(
-          cUrl,
-          ac.signal,
-          manifest.contour?.bytes || pack.layers.topo?.contourBytes || 0,
-          onProgress,
-          45,
-          90
-        );
-        await assertPmtilesBlob(cBlob, 'contour PMTiles');
-        await writePackBlob(cName, cBlob, pct => {
-          onProgress?.({
-            done: cBlob.size,
-            total: cBlob.size,
-            pct: 90 + Math.round(pct / 10)
-          });
-        });
-        clearPmtilesCache(`magene-map-${pack.id}-contour`);
-        totalBytes += cBlob.size;
-      }
+      clearPmtilesCache(`magene-map-${pack.id}-contour`);
     }
-
     clearPmtilesCache(key);
 
     await metaPut({
@@ -669,6 +655,15 @@ export async function downloadMapLayer(
   } finally {
     abortControllers.delete(key);
   }
+}
+
+/** @deprecated Use installMapLayerFromZip — network CDN install removed. */
+export async function downloadMapLayer(
+  pack: MapPackCatalogEntry,
+  layer: MapLayerKind,
+  onProgress?: (p: DownloadProgress) => void
+): Promise<void> {
+  return installMapLayerFromZip(pack, layer, undefined, onProgress);
 }
 
 export function cancelDownload(packId: string, layer: MapLayerKind): void {
@@ -710,7 +705,10 @@ export function packTotalBytes(pack: MapPackCatalogEntry): number {
   return n;
 }
 
-/** Relative catalog URLs are served from the app bundle (Vite/Capacitor assets). */
+/**
+ * True when the layer URL is still same-origin relative (no VITE_MAP_PACK_BASE_URL).
+ * After catalog rewrite, remote CDN URLs are absolute https — not "in app".
+ */
 export function isLayerBundled(pack: MapPackCatalogEntry, layer: MapLayerKind): boolean {
   const url = pack.layers[layer]?.url;
   return !!url && url.startsWith('/');

@@ -65,6 +65,8 @@ export interface RouteData {
   turns?: RouteTurn[];
   /** Alternate OSRM routes saved at create-time for offline TBT snap */
   alternatives?: RouteAlternative[];
+  /** Explicit pins used at create: [start, ...vias, dest] */
+  waypoints?: { lat: number; lng: number }[];
   startLat?: number;
   startLng?: number;
   endLat?: number;
@@ -152,6 +154,8 @@ export interface RideMetrics {
   activeSessionId?: string | null;
 }
 
+export type SensorProtocol = 'ble' | 'ant';
+
 export interface BleDeviceStatus {
   hrmConnected: boolean;
   cscConnected: boolean;
@@ -159,6 +163,10 @@ export interface BleDeviceStatus {
   hrmDeviceName?: string;
   cscDeviceName?: string;
   powerDeviceName?: string;
+  /** Active radio for each role (exclusive BLE vs ANT+) */
+  hrmProtocol?: SensorProtocol | null;
+  cscProtocol?: SensorProtocol | null;
+  powerProtocol?: SensorProtocol | null;
 }
 
 export interface GpsStatus {

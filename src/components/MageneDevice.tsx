@@ -248,7 +248,15 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   ]);
 
   const navPoints = navBranch?.points?.length ? navBranch.points : routePoints;
-  const navTurns = navBranch?.turns?.length ? navBranch.turns : routeTurns;
+  // Alt branch: never fall back to primary turns (wrong corridor). Primary may use props.
+  const navTurns =
+    navBranch == null
+      ? routeTurns
+      : navBranch.branchId !== PRIMARY_BRANCH_ID
+        ? navBranch.turns || []
+        : navBranch.turns?.length
+          ? navBranch.turns
+          : routeTurns;
   const distAlongRoute =
     navBranch != null ? navBranch.distAlongRoute : metrics.distanceTraveled;
   const activeAltPoints =
@@ -283,6 +291,9 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
     : null) ?? metrics.currentElevation;
 
   const nextTurnCue = getNextTurn(navTurns, distAlongRoute);
+  const showNextTurnCue = Boolean(
+    hasActiveRoute && nextTurnCue && navBranch && !navBranch.offRoute
+  );
   const formatTurnDist = (m: number) =>
     m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${m} m`;
 
@@ -303,17 +314,19 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
     <div className="w-full h-screen h-[100dvh] flex flex-col justify-between overflow-hidden bg-white select-none">
       
       {/* 1. TOP DEVICE STATUS BAR: GPS, SENSORS, PAGE, BATTERY & MENU TRIGGER */}
-      <div className={`h-8 px-3 flex items-center justify-between text-[11px] font-mono-digital shrink-0 ${
+      <div className={`min-h-11 px-3 flex items-center justify-between text-[11px] font-mono-digital shrink-0 ${
         isDarkMode ? 'bg-zinc-950 text-zinc-300 border-b border-zinc-800' : 'bg-zinc-100 text-zinc-700 border-b border-zinc-200'
       }`}>
         <div className="flex items-center gap-2">
-          {/* Menu Drawer Button */}
+          {/* Menu Drawer Button — large hit target for mount / elderly use */}
           <button
+            type="button"
             onClick={onOpenMenuDrawer}
-            className="p-1 -ml-1 rounded hover:bg-zinc-200/80 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 transition-colors"
+            className="min-w-11 min-h-11 -ml-2 flex items-center justify-center rounded-lg hover:bg-zinc-200/80 dark:hover:bg-zinc-800 text-zinc-700 dark:text-zinc-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             title="Menu & Routes"
+            aria-label="Open menu"
           >
-            <Menu className="w-4 h-4" />
+            <Menu className="w-5 h-5" />
           </button>
 
           {/* Active Session REC / PAUSE Indicator */}
@@ -409,7 +422,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
           <button 
             onClick={onOpenSensorModal}
             className="flex items-center gap-0.5 hover:text-blue-500 transition-colors ml-1"
-            title="Bluetooth Sensors"
+            title="Sensors (BLE / ANT+)"
           >
             <Bluetooth className={`w-3.5 h-3.5 ${
               bleStatus.hrmConnected || bleStatus.cscConnected || bleStatus.powerConnected
@@ -616,7 +629,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                 </div>
               )}
               {/* Live next-turn cue (square, bottom-left) */}
-              {nextTurnCue && (
+              {showNextTurnCue && nextTurnCue && (
                 <NextTurnSquare cue={nextTurnCue} formatDist={formatTurnDist} />
               )}
             </div>
@@ -698,92 +711,148 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
 
         {/* PAGE 2: DEDICATED FULL CLIMBPRO HUD */}
         {currentPage === 2 && (
-          <div className={`flex-1 flex flex-col justify-between p-3.5 overflow-y-auto ${isDarkMode ? 'bg-zinc-950' : 'bg-white'}`}>
-            <div className="flex items-center justify-between border-b pb-2 border-zinc-200/80">
-              <div className="flex items-center gap-2">
-                <Mountain className="w-5 h-5 text-blue-600" />
-                <div>
-                  <div className="text-[10px] font-sports font-bold tracking-wider text-zinc-400 uppercase">
-                    {climbState.isInClimb
-                      ? (routePoints.length > 1
-                          ? `CLIMB ${climbState.currentClimbIndex}/${climbState.totalClimbsCount}`
-                          : `RECORDING CLIMB ${climbState.currentClimbIndex}`)
-                      : (routePoints.length > 1 ? 'UPCOMING CLIMB' : 'FREE RIDE CLIMB')}
-                  </div>
-                  <div className="font-sports font-bold text-base sm:text-lg leading-tight">
-                    {climbState.currentClimb?.name || climbState.nextClimb?.name || (routePoints.length > 1 ? 'Climb Sector' : 'No climb yet')}
+          <div
+            className={`flex-1 flex flex-col justify-between overflow-y-auto ${
+              isDarkMode ? 'bg-zinc-950' : 'bg-white'
+            }`}
+          >
+            <div className={`flex flex-col ${isDarkMode ? 'divide-zinc-800' : 'divide-zinc-200'} divide-y`}>
+              <div className="flex items-center justify-between gap-3 px-3 py-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Mountain className={`w-6 h-6 shrink-0 ${isDarkMode ? 'text-blue-400' : 'text-blue-600'}`} />
+                  <div className="min-w-0">
+                    <div
+                      className={`text-[11px] sm:text-xs font-sports font-bold tracking-wide uppercase ${
+                        isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+                      }`}
+                    >
+                      {climbState.isInClimb
+                        ? (routePoints.length > 1
+                            ? `CLIMB ${climbState.currentClimbIndex}/${climbState.totalClimbsCount}`
+                            : `RECORDING CLIMB ${climbState.currentClimbIndex}`)
+                        : (routePoints.length > 1 ? 'UPCOMING CLIMB' : 'FREE RIDE CLIMB')}
+                    </div>
+                    <div className="font-sports font-bold text-lg sm:text-xl leading-tight truncate">
+                      {climbState.currentClimb?.name || climbState.nextClimb?.name || (routePoints.length > 1 ? 'Climb Sector' : 'No climb yet')}
+                    </div>
                   </div>
                 </div>
+                <span className="shrink-0 inline-flex items-center justify-center min-h-8 bg-blue-600 text-white font-digital font-bold px-3 py-1.5 rounded text-sm">
+                  Cat {climbState.currentClimb?.category || climbState.nextClimb?.category || '—'}
+                </span>
               </div>
-              <span className="bg-blue-600 text-white font-digital font-bold px-2 py-0.5 rounded text-xs">
-                Cat {climbState.currentClimb?.category || climbState.nextClimb?.category || '—'}
-              </span>
+
+              <div
+                className={`grid grid-cols-2 ${
+                  isDarkMode ? 'divide-zinc-800' : 'divide-zinc-200'
+                } divide-x divide-y`}
+              >
+                <div className="flex flex-col items-center justify-center px-3 py-3 text-center">
+                  <span
+                    className={`text-[11px] sm:text-xs font-sports font-bold uppercase ${
+                      isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+                    }`}
+                  >
+                    {hasActiveRoute
+                      ? (climbState.isInClimb ? 'CLIMB REMAIN' : 'DIST. REMAIN')
+                      : (climbState.isInClimb ? 'CLIMB DIST' : 'DIST. REMAIN')}
+                  </span>
+                  <span className="font-digital text-2xl sm:text-3xl font-bold leading-none mt-1.5 tabular-nums">
+                    {hasActiveRoute
+                      ? (climbState.isInClimb
+                          ? (climbState.distRemainingToTop / 1000).toFixed(2)
+                          : distRemainKm)
+                      : (climbState.isInClimb
+                          ? ((climbState.currentClimb?.totalLength || 0) / 1000).toFixed(2)
+                          : '0.00')}{' '}
+                    <span className={`text-sm font-bold ${isDarkMode ? 'text-zinc-400' : 'text-zinc-500'}`}>km</span>
+                  </span>
+                </div>
+                <div className="flex flex-col items-center justify-center px-3 py-3 text-center">
+                  <span
+                    className={`text-[11px] sm:text-xs font-sports font-bold uppercase ${
+                      isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+                    }`}
+                  >
+                    {!hasActiveRoute && climbState.isInClimb ? 'CLIMB GAIN' : 'REM. ASCENT'}
+                  </span>
+                  <span className="font-digital text-2xl sm:text-3xl font-bold leading-none mt-1.5 tabular-nums">
+                    {hasActiveRoute
+                      ? (climbState.isInClimb ? Math.round(climbState.remAscent) : remAscentM)
+                      : (climbState.isInClimb
+                          ? Math.round(climbState.currentClimb?.totalElevationGain || 0)
+                          : 0)}{' '}
+                    <span className={`text-sm font-bold ${isDarkMode ? 'text-zinc-400' : 'text-zinc-500'}`}>m</span>
+                  </span>
+                </div>
+                <div className="flex flex-col items-center justify-center px-3 py-3 text-center">
+                  <span
+                    className={`text-[11px] sm:text-xs font-sports font-bold uppercase ${
+                      isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+                    }`}
+                  >
+                    AVG GRADE REM.
+                  </span>
+                  <span className="font-digital text-2xl sm:text-3xl font-bold leading-none mt-1.5 tabular-nums text-blue-600">
+                    {profileAvgGrade.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="flex flex-col items-center justify-center px-3 py-3 text-center">
+                  <span
+                    className={`text-[11px] sm:text-xs font-sports font-bold uppercase ${
+                      isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+                    }`}
+                  >
+                    CURRENT GRADE
+                  </span>
+                  <span className="font-digital text-2xl sm:text-3xl font-bold leading-none mt-1.5 tabular-nums text-emerald-600">
+                    {metrics.currentGrade.toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+
+              <div className="min-h-[140px]">
+                <ClimbProElevationChart
+                  climb={climbState.currentClimb || climbState.nextClimb}
+                  routePoints={climbChartPoints}
+                  currentDist={metrics.distanceTraveled}
+                  currentGrade={metrics.currentGrade}
+                  avgGradeRemaining={profileAvgGrade}
+                  isDarkMode={isDarkMode}
+                />
+              </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 my-2">
-              <div className={`border rounded-xl p-2 flex flex-col items-center ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
-                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">
-                  {hasActiveRoute
-                    ? (climbState.isInClimb ? 'CLIMB REMAIN' : 'DIST. REMAIN')
-                    : (climbState.isInClimb ? 'CLIMB DIST' : 'DIST. REMAIN')}
+            <div
+              className={`grid grid-cols-2 border-t ${
+                isDarkMode ? 'divide-zinc-800 border-zinc-800' : 'divide-zinc-200 border-zinc-200'
+              } divide-x`}
+            >
+              <div className="flex flex-col items-center justify-center px-3 py-3 text-center">
+                <span
+                  className={`text-[11px] sm:text-xs font-sports font-bold uppercase ${
+                    isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+                  }`}
+                >
+                  VAM ASCENT RATE
                 </span>
-                <span className="font-digital text-xl sm:text-2xl font-bold">
-                  {hasActiveRoute
-                    ? (climbState.isInClimb
-                        ? (climbState.distRemainingToTop / 1000).toFixed(2)
-                        : distRemainKm)
-                    : (climbState.isInClimb
-                        ? ((climbState.currentClimb?.totalLength || 0) / 1000).toFixed(2)
-                        : '0.00')}{' '}
-                  <span className="text-xs">km</span>
+                <div className="font-digital text-xl sm:text-2xl font-bold leading-none mt-1.5 tabular-nums">
+                  {metrics.vam}{' '}
+                  <span className={`text-sm font-bold ${isDarkMode ? 'text-zinc-400' : 'text-zinc-500'}`}>m/h</span>
+                </div>
+              </div>
+              <div className="flex flex-col items-center justify-center px-3 py-3 text-center">
+                <span
+                  className={`text-[11px] sm:text-xs font-sports font-bold uppercase ${
+                    isDarkMode ? 'text-zinc-400' : 'text-zinc-500'
+                  }`}
+                >
+                  TOTAL GAIN
                 </span>
-              </div>
-              <div className={`border rounded-xl p-2 flex flex-col items-center ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
-                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">
-                  {hasActiveRoute
-                    ? (climbState.isInClimb ? 'REM. ASCENT' : 'REM. ASCENT')
-                    : (climbState.isInClimb ? 'CLIMB GAIN' : 'REM. ASCENT')}
-                </span>
-                <span className="font-digital text-xl sm:text-2xl font-bold">
-                  {hasActiveRoute
-                    ? (climbState.isInClimb ? Math.round(climbState.remAscent) : remAscentM)
-                    : (climbState.isInClimb
-                        ? Math.round(climbState.currentClimb?.totalElevationGain || 0)
-                        : 0)}{' '}
-                  <span className="text-xs">m</span>
-                </span>
-              </div>
-              <div className={`border rounded-xl p-2 flex flex-col items-center ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
-                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">
-                  {climbState.isInClimb ? 'AVG GRADE REM.' : 'AVG GRADE REM.'}
-                </span>
-                <span className="font-digital text-xl sm:text-2xl font-bold text-blue-600">{profileAvgGrade.toFixed(1)}%</span>
-              </div>
-              <div className={`border rounded-xl p-2 flex flex-col items-center ${isDarkMode ? 'bg-zinc-900 border-zinc-800' : 'bg-zinc-50 border-zinc-200'}`}>
-                <span className="text-[9px] font-sports font-bold text-zinc-400 uppercase">CURRENT GRADE</span>
-                <span className="font-digital text-xl sm:text-2xl font-bold text-emerald-600">{metrics.currentGrade.toFixed(1)}%</span>
-              </div>
-            </div>
-
-            <div className="border border-zinc-200 rounded-xl overflow-hidden shadow-xs my-1">
-              <ClimbProElevationChart
-                climb={climbState.currentClimb || climbState.nextClimb}
-                routePoints={climbChartPoints}
-                currentDist={metrics.distanceTraveled}
-                currentGrade={metrics.currentGrade}
-                avgGradeRemaining={profileAvgGrade}
-                isDarkMode={isDarkMode}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-2 border-t pt-2 border-zinc-200/80">
-              <div className="text-center">
-                <span className="text-[10px] font-sports text-zinc-400 uppercase">VAM ASCENT RATE</span>
-                <div className="font-digital text-lg sm:text-xl font-bold">{metrics.vam} <span className="text-xs text-zinc-500">m/h</span></div>
-              </div>
-              <div className="text-center">
-                <span className="text-[10px] font-sports text-zinc-400 uppercase">TOTAL GAIN</span>
-                <div className="font-digital text-lg sm:text-xl font-bold">{Math.round(metrics.totalAscent)} <span className="text-xs text-zinc-500">m</span></div>
+                <div className="font-digital text-xl sm:text-2xl font-bold leading-none mt-1.5 tabular-nums">
+                  {Math.round(metrics.totalAscent)}{' '}
+                  <span className={`text-sm font-bold ${isDarkMode ? 'text-zinc-400' : 'text-zinc-500'}`}>m</span>
+                </div>
               </div>
             </div>
           </div>
@@ -975,7 +1044,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                   ALT ROUTE TBT
                 </div>
               )}
-              {nextTurnCue && (
+              {showNextTurnCue && nextTurnCue && (
                 <NextTurnSquare cue={nextTurnCue} formatDist={formatTurnDist} />
               )}
             </div>
@@ -987,7 +1056,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
           <div className={`flex-1 flex flex-col justify-between p-3.5 overflow-y-auto ${isDarkMode ? 'bg-zinc-950' : 'bg-zinc-50'}`}>
             <div className="space-y-2.5">
               <div className="font-sports font-bold text-sm border-b pb-1.5 flex items-center justify-between">
-                <span>BLE HARDWARE SENSORS</span>
+                <span>SENSORS (BLE / ANT+)</span>
                 <button 
                   onClick={onOpenSensorModal}
                   className="text-xs text-blue-600 font-bold"
@@ -1001,8 +1070,12 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                   <div className="flex items-center gap-2">
                     <Heart className="w-4 h-4 text-red-500" />
                     <div>
-                      <div className="text-xs font-bold">Heart Rate Monitor (0x180D)</div>
-                      <div className="text-[10px] text-zinc-400">{bleStatus.hrmDeviceName || 'Not Connected'}</div>
+                      <div className="text-xs font-bold">Heart Rate</div>
+                      <div className="text-[10px] text-zinc-400">
+                        {bleStatus.hrmConnected
+                          ? `${bleStatus.hrmDeviceName || 'Connected'}${bleStatus.hrmProtocol ? ` · ${bleStatus.hrmProtocol === 'ant' ? 'ANT+' : 'BLE'}` : ''}`
+                          : 'Not connected'}
+                      </div>
                     </div>
                   </div>
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${bleStatus.hrmConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-100 text-zinc-600'}`}>
@@ -1014,8 +1087,12 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                   <div className="flex items-center gap-2">
                     <Activity className="w-4 h-4 text-blue-500" />
                     <div>
-                      <div className="text-xs font-bold">Speed / Cadence (0x1816)</div>
-                      <div className="text-[10px] text-zinc-400">{bleStatus.cscDeviceName || 'Not Connected'}</div>
+                      <div className="text-xs font-bold">Speed / Cadence</div>
+                      <div className="text-[10px] text-zinc-400">
+                        {bleStatus.cscConnected
+                          ? `${bleStatus.cscDeviceName || 'Connected'}${bleStatus.cscProtocol ? ` · ${bleStatus.cscProtocol === 'ant' ? 'ANT+' : 'BLE'}` : ''}`
+                          : 'Not connected'}
+                      </div>
                     </div>
                   </div>
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${bleStatus.cscConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-100 text-zinc-600'}`}>
@@ -1027,8 +1104,12 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
                   <div className="flex items-center gap-2">
                     <Zap className="w-4 h-4 text-amber-500" />
                     <div>
-                      <div className="text-xs font-bold">Power Meter (0x1818)</div>
-                      <div className="text-[10px] text-zinc-400">{bleStatus.powerDeviceName || 'Not Connected'}</div>
+                      <div className="text-xs font-bold">Power Meter</div>
+                      <div className="text-[10px] text-zinc-400">
+                        {bleStatus.powerConnected
+                          ? `${bleStatus.powerDeviceName || 'Connected'}${bleStatus.powerProtocol ? ` · ${bleStatus.powerProtocol === 'ant' ? 'ANT+' : 'BLE'}` : ''}`
+                          : 'Not connected'}
+                      </div>
                     </div>
                   </div>
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${bleStatus.powerConnected ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-100 text-zinc-600'}`}>

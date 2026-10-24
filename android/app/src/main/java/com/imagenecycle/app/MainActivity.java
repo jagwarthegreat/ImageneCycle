@@ -8,6 +8,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(BackgroundLocationPlugin.class);
+        registerPlugin(AntPlusSensorsPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

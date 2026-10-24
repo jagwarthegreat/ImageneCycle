@@ -63,8 +63,13 @@ export const RoutePickerMap: React.FC<RoutePickerMapProps> = ({
       attributionControl: false
     });
 
+    mapRef.current = map;
+
+    map.on('click', (e: L.LeafletMouseEvent) => {
+      onClickRef.current({ lat: e.latlng.lat, lng: e.latlng.lng });
+    });
+
     void (async () => {
-      if (!mapRef.current) return;
       const lat = center.lat || 14.6;
       const lng = center.lng || 121;
       const active = await resolveActiveBasemap(lat, lng);
@@ -94,16 +99,12 @@ export const RoutePickerMap: React.FC<RoutePickerMapProps> = ({
           /* fall through to world overview */
         }
       }
+      if (!mapRef.current) return;
       L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19
       }).addTo(map);
     })();
 
-    map.on('click', (e: L.LeafletMouseEvent) => {
-      onClickRef.current({ lat: e.latlng.lat, lng: e.latlng.lng });
-    });
-
-    mapRef.current = map;
     setTimeout(() => map.invalidateSize(), 100);
     setTimeout(() => map.invalidateSize(), 400);
 

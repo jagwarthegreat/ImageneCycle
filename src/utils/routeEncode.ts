@@ -5,6 +5,7 @@
 import { RouteAlternative, RouteData, RoutePoint, RouteTurn } from '../types/cycling';
 import { detectClimbsFromPoints } from './climbProEngine';
 import { haversineDistanceMeters, calculateBearingDegrees } from './gpsService';
+import { projectPointToPolyline } from './routeMatching';
 
 export interface LatLng {
   lat: number;
@@ -283,6 +284,33 @@ export function buildRoutePointsFromCoords(coords: LatLng[], elevations: number[
   return points;
 }
 
+/** Remap OSRM turn cumulatives onto densified polyline distance space. */
+export function remapTurnsOntoPolyline(turns: RouteTurn[], points: RoutePoint[]): RouteTurn[] {
+  if (!turns.length || points.length < 2) return turns.map(t => ({ ...t }));
+
+  const remapped = turns.map(turn => {
+    const loc = turn.location;
+    if (!loc || (!loc.lat && !loc.lng)) return { ...turn };
+    const proj = projectPointToPolyline(loc.lat, loc.lng, points);
+    return {
+      ...turn,
+      distFromRouteStart: Math.round(proj.distAlongRoute)
+    };
+  });
+
+  // Keep step distanceMeters consistent with successive remapped starts (last keeps OSRM length).
+  for (let i = 0; i < remapped.length - 1; i++) {
+    const nextStart = remapped[i + 1].distFromRouteStart;
+    const curStart = remapped[i].distFromRouteStart;
+    remapped[i] = {
+      ...remapped[i],
+      distanceMeters: Math.max(0, nextStart - curStart)
+    };
+  }
+
+  return remapped;
+}
+
 export function buildRouteFromEncodedPath(
   name: string,
   coords: LatLng[],
@@ -292,6 +320,7 @@ export function buildRouteFromEncodedPath(
     id?: string;
     turns?: RouteTurn[];
     alternatives?: RouteAlternative[];
+    waypoints?: LatLng[];
   }
 ): RouteData {
   const points = buildRoutePointsFromCoords(coords, elevations);
@@ -304,6 +333,16 @@ export function buildRouteFromEncodedPath(
   const first = points[0];
   const last = points[points.length - 1];
   const climbs = detectClimbsFromPoints(points);
+  const turns = options?.turns?.length
+    ? remapTurnsOntoPolyline(options.turns, points)
+    : options?.turns || [];
+
+  const alternatives = options?.alternatives?.length
+    ? options.alternatives.map(alt => ({
+        ...alt,
+        turns: alt.turns?.length ? remapTurnsOntoPolyline(alt.turns, alt.points) : alt.turns
+      }))
+    : undefined;
 
   return {
     id: options?.id || `route-${Date.now()}`,
@@ -313,8 +352,11 @@ export function buildRouteFromEncodedPath(
     totalElevationGain: Math.round(totalElevationGain),
     points,
     climbs,
-    turns: options?.turns || [],
-    alternatives: options?.alternatives?.length ? options.alternatives : undefined,
+    turns,
+    alternatives,
+    waypoints: options?.waypoints?.length
+      ? options.waypoints.map(w => ({ lat: w.lat, lng: w.lng }))
+      : undefined,
     startLat: first?.lat,
     startLng: first?.lng,
     endLat: last?.lat,
@@ -329,7 +371,8 @@ export function recomputeRouteFromPoints(route: RouteData, elevations: number[])
     id: route.id,
     location: route.location,
     turns: route.turns,
-    alternatives: route.alternatives
+    alternatives: route.alternatives,
+    waypoints: route.waypoints
   });
 }
 
@@ -374,6 +417,12 @@ export interface NextTurnCue {
   metersToManeuver: number;
 }
 
+function isDisplayableTurn(turn: RouteTurn): boolean {
+  const type = turn.maneuverType || '';
+  if (type === 'depart' || type === 'notification') return false;
+  return true;
+}
+
 /** Live next-turn cue from OSRM steps + distance along route */
 export function getNextTurn(
   turns: RouteTurn[] | undefined,
@@ -381,23 +430,26 @@ export function getNextTurn(
 ): NextTurnCue | null {
   if (!turns || turns.length === 0) return null;
 
-  for (const turn of turns) {
+  const actionable = turns.filter(isDisplayableTurn);
+  const list = actionable.length ? actionable : turns;
+
+  for (const turn of list) {
     const stepEnd = turn.distFromRouteStart + turn.distanceMeters;
     if (distanceTraveled < stepEnd - 1) {
       // Distance until this step's maneuver point (start of step)
       const metersToManeuver = Math.max(0, Math.round(turn.distFromRouteStart - distanceTraveled));
-      // If already past maneuver into the step, show remaining length of step
+      // If already past maneuver into the step, show remaining distance to next maneuver start
       const inStep = distanceTraveled >= turn.distFromRouteStart;
       return {
         turn,
         metersToManeuver: inStep
-          ? Math.max(0, Math.round(stepEnd - distanceTraveled))
+          ? Math.max(0, Math.round(turn.distFromRouteStart + turn.distanceMeters - distanceTraveled))
           : metersToManeuver
       };
     }
   }
 
-  const last = turns[turns.length - 1];
+  const last = list[list.length - 1];
   return { turn: last, metersToManeuver: 0 };
 }
 
@@ -446,14 +498,15 @@ export async function evaluateRouteFromEndpoints(
     return {
       id: `alt-${i + 1}`,
       points,
-      turns: alt.turns,
+      turns: remapTurnsOntoPolyline(alt.turns, points),
       totalDistance: last ? last.distFromStart : 0
     };
   });
 
   const route = buildRouteFromEncodedPath(name, coords, elevations, {
     turns,
-    alternatives
+    alternatives,
+    waypoints
   });
   return { route, usedOsrm };
 }

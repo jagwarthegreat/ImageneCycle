@@ -246,54 +246,48 @@ class BleManager {
     }
   }
 
-  public async disconnectAll() {
-    const slots: Array<{
-      id: string | null;
-      service: string;
-      characteristic: string;
-      clear: () => void;
-    }> = [
-      {
-        id: this.hrmDeviceId,
-        service: HEART_RATE_SERVICE,
-        characteristic: HEART_RATE_MEASUREMENT,
-        clear: () => {
-          this.hrmDeviceId = null;
-        }
-      },
-      {
-        id: this.cscDeviceId,
-        service: CSC_SERVICE,
-        characteristic: CSC_MEASUREMENT,
-        clear: () => {
-          this.cscDeviceId = null;
-        }
-      },
-      {
-        id: this.powerDeviceId,
-        service: POWER_SERVICE,
-        characteristic: POWER_MEASUREMENT,
-        clear: () => {
-          this.powerDeviceId = null;
-        }
-      }
-    ];
-
-    for (const slot of slots) {
-      if (!slot.id) continue;
-      try {
-        await BleClient.stopNotifications(slot.id, slot.service, slot.characteristic);
-      } catch {
-        /* already gone */
-      }
-      try {
-        await BleClient.disconnect(slot.id);
-      } catch {
-        /* already gone */
-      }
-      slot.clear();
+  private async disconnectSlot(
+    id: string | null,
+    service: string,
+    characteristic: string,
+    clear: () => void
+  ): Promise<void> {
+    if (!id) return;
+    try {
+      await BleClient.stopNotifications(id, service, characteristic);
+    } catch {
+      /* already gone */
     }
+    try {
+      await BleClient.disconnect(id);
+    } catch {
+      /* already gone */
+    }
+    clear();
+  }
 
+  public async disconnectHeartRate(): Promise<void> {
+    await this.disconnectSlot(this.hrmDeviceId, HEART_RATE_SERVICE, HEART_RATE_MEASUREMENT, () => {
+      this.hrmDeviceId = null;
+    });
+  }
+
+  public async disconnectCadenceSpeed(): Promise<void> {
+    await this.disconnectSlot(this.cscDeviceId, CSC_SERVICE, CSC_MEASUREMENT, () => {
+      this.cscDeviceId = null;
+    });
+  }
+
+  public async disconnectPowerMeter(): Promise<void> {
+    await this.disconnectSlot(this.powerDeviceId, POWER_SERVICE, POWER_MEASUREMENT, () => {
+      this.powerDeviceId = null;
+    });
+  }
+
+  public async disconnectAll() {
+    await this.disconnectHeartRate();
+    await this.disconnectCadenceSpeed();
+    await this.disconnectPowerMeter();
     this.addLog('SYSTEM', 'All BLE hardware sensors disconnected.');
   }
 }

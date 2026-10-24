@@ -315,7 +315,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       mapInstanceRef.current = map;
       setMapEpoch(e => e + 1);
 
-      // Render Start & Summit Endpoints if route is loaded
+      // Render Start & End endpoints if route is loaded
       if (latLngs.length > 1) {
         updateEndpointsAndChevrons(map, latLngs);
       }
@@ -431,13 +431,13 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     });
     L.marker(startPt, { icon: startIcon, interactive: false }).addTo(endpointsRef.current);
 
-    // Summit Marker
+    // End Marker
     const endPt = latLngs[latLngs.length - 1];
     const endIcon = L.divIcon({
       className: 'route-end-icon',
       html: `
         <div style="background: #dc2626; color: white; font-weight: bold; font-size: 10px; padding: 2px 5px; border-radius: 4px; border: 1px solid white; box-shadow: 0 1px 3px rgba(0,0,0,0.4); text-transform: uppercase;">
-          SUMMIT
+          END
         </div>
       `,
       iconSize: [46, 20],

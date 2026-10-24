@@ -16,6 +16,9 @@
     "maps:contours": "node scripts/build-contour-pack.mjs",
     "maps:stubs": "node scripts/write-sea-pack-stubs.mjs",
     "maps:verify": "node scripts/verify-offline-maps.mjs",
+    "maps:guard": "node scripts/guard-no-bundled-pmtiles.mjs",
+    "maps:zip": "node scripts/zip-country-map.mjs",
+    "build:release": "npm run maps:guard && vite build",
     "icons:gen": "node scripts/generate-app-icons.mjs"
   },
   "dependencies": {
@@ -34,6 +37,7 @@
     "dotenv": "^17.2.3",
     "egm96-universal": "^1.1.1",
     "express": "^4.21.2",
+    "fflate": "^0.8.3",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",

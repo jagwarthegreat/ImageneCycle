@@ -22,3 +22,6 @@ public/maps/packs/*.timestamp
 tools/go-pmtiles/
 tools/contour-tmp/
 
+# Country map zips for sideload install (npm run maps:zip)
+dist-map-zips/
+

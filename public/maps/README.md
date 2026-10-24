@@ -1,6 +1,6 @@
-# Offline map packs (Guru-style downloads)
+# Offline map packs (local zip install)
 
-The app **does not ship** country map binaries. First load shows a **world overview** (online OSM/Carto). Users download OpenStreetMap-derived Magene packs into phone storage (OPFS / Custom folder) for offline rides.
+The app **does not ship** country map binaries. First load shows a **world overview** (online OSM/Carto). Users install OpenStreetMap-derived Magene packs from a **local zip** on the phone into Maps Storage (OPFS / Custom folder) for offline rides.
 
 | Layer | Magene file | Role |
 |-------|-------------|------|
@@ -17,35 +17,30 @@ Philippines, Vietnam, Singapore, Malaysia, Indonesia, Taiwan, Brunei — see [`c
 ## What ships in the SPA
 
 ```
-public/maps/catalog.json          # country list + remote pack URLs + sizes
-public/maps/packs/*.nav.json      # hostable N stubs
-public/maps/packs/*.topo.json     # hostable T manifests (magene-topo-v2)
+public/maps/catalog.json          # country list + sizes / bbox
+public/maps/packs/*.nav.json      # N stubs
+public/maps/packs/*.topo.json     # T manifests (magene-topo-v2)
 public/maps/packs/.gitkeep
 ```
 
 Large binaries are **gitignored**:
 
 - `*.pmtiles` (map + contour), Guru `*.vm` / `*.rt` / `*.elv`, caches, `tileCache.db`
+- `dist-map-zips/` (sideload archives from `npm run maps:zip`)
 
-## Publishing packs (ops / CDN)
+## Build + sideload a country zip
 
 1. Build a country map extract:
 
    ```bash
    npm run maps:extract -- --id=ph
-   # or: npm run maps:ph
    # writes public/maps/packs/philippines.pmtiles (gitignored)
-   # PMTILES_URL=https://… npm run maps:extract -- --id=vn
-   # PROTOMAPS_BUILD=YYYYMMDD npm run maps:extract -- --id=sg
    ```
 
 2. Build topographic contours (T companion):
 
    ```bash
    npm run maps:contours -- --id=ph
-   # synthetic DEM isolines by default (ride-map look)
-   # real isolines: CONTOUR_GEOJSON=./ph.geojson npm run maps:contours -- --id=ph
-   # or: CONTOUR_PMTILES_URL=https://… npm run maps:contours -- --id=ph
    ```
 
 3. Refresh N/T JSON stubs (optional):
@@ -54,23 +49,40 @@ Large binaries are **gitignored**:
    node scripts/write-sea-pack-stubs.mjs
    ```
 
-4. Upload to the same paths as `layers.*.url` / `contourUrl` in [`catalog.json`](./catalog.json), e.g.:
+4. Pack a sideload zip (**STORE** / no recompression):
 
-   ```
-   /maps/packs/philippines.pmtiles
-   /maps/packs/philippines.nav.json
-   /maps/packs/philippines.topo.json
-   /maps/packs/philippines.contour.pmtiles
+   ```bash
+   npm run maps:zip -- --id=ph
+   # → dist-map-zips/philippines-maps.zip
    ```
 
-5. Or point catalog URLs at your CDN (absolute HTTPS). The app downloads into Maps Storage; install = valid local file (PMTiles magic / JSON), not “file exists on the server”.
+   Flat members inside the zip:
 
-6. Keep accurate `bytes` / `contourBytes` in the catalog for Download Maps size labels. `topo.bytes` should cover manifest + contour total.
+   ```
+   philippines.pmtiles
+   philippines.contour.pmtiles
+   philippines.nav.json
+   philippines.topo.json
+   ```
+
+5. Copy the zip onto the phone:
+
+   ```
+   Download/ImageneCycle/philippines-maps.zip
+   ```
+
+   USB, Drive, or any file manager is fine. On Android 13+, if the app cannot scan that folder, use **Browse** in Download Maps.
+
+6. In the app: **Download Maps** → **Install** (or Browse). Files land in Maps Storage; the zip is left on disk.
+
+7. Before Android release: `npm run maps:guard` (fails if any `public/maps/packs/*.pmtiles` would ship in the bundle). Keep accurate `bytes` / `contourBytes` in the catalog.
+
+Network CDN / Supabase upload is **not** used for install. Optional `VITE_MAP_PACK_*` env vars are unused for this flow.
 
 ## Runtime
 
 1. No local country pack → world overview tiles (online).
-2. User downloads M (and optionally N/T) via **Download Maps** → OPFS / Custom.
+2. User installs M (and optionally N/T) via **Download Maps** from a local zip → OPFS / Custom.
 3. GPS inside pack bbox → `protomaps-leaflet` loads the local M blob offline.
 4. **DET** (details) densifies labels + OsmAnd-style POI kinds from the M pack.
 5. **T installed** → contour PMTiles overlay (not gated on DET).
