@@ -20,6 +20,7 @@ export interface BreadcrumbPoint {
   heartRate?: number | null; // bpm
   distance?: number; // meters
   temperature?: number; // °C → gpxtpx:atemp
+  quality?: 'good' | 'weak' | 'stitch';
 }
 
 export interface ExportableRideData {

@@ -6,6 +6,7 @@ import {
   loadMapCatalog,
   getInstallSnapshot,
   installMapLayerFromZip,
+  installPackFromZip,
   deleteMapLayer,
   cancelDownload,
   formatBytes,
@@ -51,7 +52,7 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
   const [browseHint, setBrowseHint] = useState<{
     slug: string;
     packId: string;
-    layer: MapLayerKind;
+    layer?: MapLayerKind;
   } | null>(null);
 
   const refresh = useCallback(async () => {
@@ -88,7 +89,7 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
 
   const layerKey = (packId: string, layer: MapLayerKind) => `${packId}:${layer}`;
 
-  const runInstall = async (pack: MapPackCatalogEntry, layer: MapLayerKind, file?: File | null) => {
+  const runInstallLayer = async (pack: MapPackCatalogEntry, layer: MapLayerKind, file?: File | null) => {
     const key = layerKey(pack.id, layer);
     setBusyKey(key);
     setError(null);
@@ -119,14 +120,59 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
     }
   };
 
-  const handleInstall = async (pack: MapPackCatalogEntry, layer: MapLayerKind) => {
-    await runInstall(pack, layer);
+  /** One zip → extract M + N + T together. */
+  const runInstallPack = async (pack: MapPackCatalogEntry, file?: File | null) => {
+    const key = `pack:${pack.id}`;
+    setBusyKey(key);
+    setError(null);
+    setBrowseHint(null);
+    setProgress(p => ({ ...p, [key]: 0 }));
+    try {
+      const result = await installPackFromZip(pack, { file }, prog => {
+        setProgress(p => ({ ...p, [key]: prog.pct }));
+      });
+      setInstalled(await getInstallSnapshot());
+      clearOfflineMapProbeCache();
+      onPacksChanged?.();
+      if (result.missing.length) {
+        setError(`Installed ${result.installed.join(', ').toUpperCase()}; missing ${result.missing.join(', ').toUpperCase()} in zip.`);
+      }
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return;
+      if (err instanceof MapZipMissingError) {
+        setBrowseHint({ slug: err.slug, packId: pack.id });
+        setError(err.message);
+      } else {
+        setError(err instanceof Error ? err.message : 'Install failed');
+      }
+    } finally {
+      setBusyKey(null);
+      setProgress(p => {
+        const next = { ...p };
+        delete next[key];
+        return next;
+      });
+    }
   };
 
-  const handleBrowse = async (pack: MapPackCatalogEntry, layer: MapLayerKind) => {
+  const handleInstallPack = async (pack: MapPackCatalogEntry) => {
+    await runInstallPack(pack);
+  };
+
+  const handleBrowsePack = async (pack: MapPackCatalogEntry) => {
     const file = await pickMapZipFile();
     if (!file) return;
-    await runInstall(pack, layer, file);
+    await runInstallPack(pack, file);
+  };
+
+  const handleInstallLayer = async (pack: MapPackCatalogEntry, layer: MapLayerKind) => {
+    await runInstallLayer(pack, layer);
+  };
+
+  const handleBrowseLayer = async (pack: MapPackCatalogEntry, layer: MapLayerKind) => {
+    const file = await pickMapZipFile();
+    if (!file) return;
+    await runInstallLayer(pack, layer, file);
   };
 
   const handleDelete = async (pack: MapPackCatalogEntry, layer: MapLayerKind) => {
@@ -179,8 +225,8 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
         </div>
 
         <p className="px-4 pt-2 text-[10px] text-zinc-500 font-sports leading-relaxed">
-          OpenStreetMap packs (M / N / T). Copy {'{country}'}-maps.zip to {MAP_ZIP_DIR}/ then Install, or use
-          Browse. Guru .vm / .rt / .elv are not supported.
+          One Install extracts M + N + T from {'{country}'}-maps.zip in {MAP_ZIP_DIR}/ (or Browse). Guru .vm /
+          .rt / .elv are not supported.
         </p>
 
         {error && (
@@ -193,7 +239,8 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
                 onClick={() => {
                   const pack = packs.find(p => p.id === browseHint.packId);
                   if (!pack) return;
-                  void handleBrowse(pack, browseHint.layer);
+                  if (browseHint.layer) void handleBrowseLayer(pack, browseHint.layer);
+                  else void handleBrowsePack(pack);
                 }}
               >
                 <FolderOpen className="w-3 h-3" />
@@ -215,6 +262,10 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
               const badge = mntBadges(inst);
               const total = packTotalBytes(pack);
               const slug = packSlug(pack);
+              const packKey = `pack:${pack.id}`;
+              const packBusy = busyKey === packKey;
+              const packPct = progress[packKey];
+              const allInstalled = !!(inst.map && inst.navigation && inst.topo);
 
               return (
                 <div key={pack.id} className="rounded-xl border border-zinc-800 bg-zinc-900/80 overflow-hidden">
@@ -246,6 +297,52 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
 
                   {open && (
                     <div className="border-t border-zinc-800 px-3 py-2 space-y-2 bg-zinc-950/50">
+                      <div className="flex items-center justify-between gap-2 pb-2 border-b border-zinc-800">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-sports font-bold text-zinc-200">Full pack (M + N + T)</div>
+                          <div className="text-[10px] text-zinc-500">
+                            {allInstalled ? 'All layers on device' : 'Install map, navigation, and topo from one zip'}
+                          </div>
+                          {typeof packPct === 'number' && (
+                            <div className="mt-1 h-1 rounded bg-zinc-800 overflow-hidden">
+                              <div className="h-full bg-blue-500 transition-all" style={{ width: `${packPct}%` }} />
+                            </div>
+                          )}
+                        </div>
+                        <div className="shrink-0 flex items-center gap-1">
+                          {packBusy ? (
+                            <button
+                              type="button"
+                              onClick={() => cancelDownload(pack.id)}
+                              className="px-2 py-1 rounded-lg bg-zinc-800 text-[10px] font-bold text-amber-400"
+                            >
+                              Cancel
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                disabled={!!busyKey}
+                                onClick={() => void handleBrowsePack(pack)}
+                                className="p-1.5 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:opacity-40"
+                                title="Browse for zip"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!!busyKey}
+                                onClick={() => void handleInstallPack(pack)}
+                                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-[10px] font-bold uppercase"
+                              >
+                                <Download className="w-3 h-3" />
+                                {allInstalled ? 'Reinstall' : 'Install'}
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+
                       {(['map', 'navigation', 'topo'] as MapLayerKind[]).map(layer => {
                         const spec = pack.layers[layer];
                         if (!spec) return null;
@@ -284,11 +381,11 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
                                   <button
                                     type="button"
                                     disabled={!!busyKey}
-                                    onClick={() => void handleInstall(pack, layer)}
+                                    onClick={() => void handleInstallLayer(pack, layer)}
                                     className="px-2 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-[10px] font-bold uppercase"
-                                    title="Reinstall from zip"
+                                    title="Reinstall layer from zip"
                                   >
-                                    Reinstall
+                                    Repair
                                   </button>
                                   <button
                                     type="button"
@@ -308,26 +405,7 @@ export const DownloadMapsModal: React.FC<DownloadMapsModalProps> = ({
                                   Cancel
                                 </button>
                               ) : (
-                                <>
-                                  <button
-                                    type="button"
-                                    disabled={!!busyKey}
-                                    onClick={() => void handleBrowse(pack, layer)}
-                                    className="p-1.5 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:opacity-40"
-                                    title="Browse for zip"
-                                  >
-                                    <FolderOpen className="w-3.5 h-3.5" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={!!busyKey}
-                                    onClick={() => void handleInstall(pack, layer)}
-                                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-[10px] font-bold uppercase"
-                                  >
-                                    <Download className="w-3 h-3" />
-                                    Install
-                                  </button>
-                                </>
+                                <span className="text-[10px] text-zinc-600 font-sports px-2">via Full pack</span>
                               )}
                             </div>
                           </div>

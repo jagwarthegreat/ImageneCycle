@@ -146,6 +146,24 @@ function clearPmtilesCache(key: string): void {
   pmtilesByKey.delete(key);
 }
 
+/** Drop cached PMTiles handles (e.g. after lock-screen resume / blank basemap). */
+export function clearAllPmtilesCaches(): void {
+  pmtilesByKey.clear();
+}
+
+/** Zip entries needed to install all installable layers (M+N+T) in one extract. */
+export function neededZipEntriesForPack(pack: MapPackCatalogEntry): NeededZipEntry[] {
+  const byZip = new Map<string, NeededZipEntry>();
+  for (const layer of ['map', 'navigation', 'topo'] as MapLayerKind[]) {
+    const spec = pack.layers[layer];
+    if (!spec || spec.infoOnly) continue;
+    for (const e of neededZipEntriesForLayer(pack, layer)) {
+      byZip.set(e.zipName, e);
+    }
+  }
+  return [...byZip.values()];
+}
+
 function asFile(blob: Blob, fileName: string): File {
   if (blob instanceof File) return blob;
   return new File([blob], fileName, { type: blob.type || 'application/octet-stream' });
@@ -657,6 +675,96 @@ export async function installMapLayerFromZip(
   }
 }
 
+/**
+ * Install M + N + T from one {slug}-maps.zip (single extract).
+ * Map layer missing → hard fail; N/T missing → skip that layer (partial).
+ */
+export async function installPackFromZip(
+  pack: MapPackCatalogEntry,
+  opts?: { file?: File | null; source?: ZipSource },
+  onProgress?: (p: DownloadProgress) => void
+): Promise<{ installed: MapLayerKind[]; missing: MapLayerKind[] }> {
+  const packKey = `pack:${pack.id}`;
+  abortControllers.get(packKey)?.abort();
+  const ac = new AbortController();
+  abortControllers.set(packKey, ac);
+
+  const installed: MapLayerKind[] = [];
+  const missing: MapLayerKind[] = [];
+
+  try {
+    const slug = packSlug(pack);
+    const source = opts?.source || (await resolveZipSource(slug, opts?.file));
+    const entries = neededZipEntriesForPack(pack);
+    if (!entries.length) {
+      throw new Error('This pack has no installable layers.');
+    }
+
+    const written = await extractEntriesFromZipSource(source, entries, onProgress, ac.signal);
+
+    for (const layer of ['map', 'navigation', 'topo'] as MapLayerKind[]) {
+      const spec = pack.layers[layer];
+      if (!spec || spec.infoOnly) continue;
+
+      const fileName = layerFileName(pack, layer);
+      if (isGuruProprietaryFileName(fileName)) {
+        throw new Error(guruUnsupportedMessage(fileName));
+      }
+
+      if (!written.has(fileName)) {
+        if (layer === 'map') {
+          throw new Error(`Zip did not contain the map file (${fileName}).`);
+        }
+        missing.push(layer);
+        console.warn(`Zip missing ${layer} entry for ${pack.name}:`, fileName);
+        continue;
+      }
+
+      if (layer === 'topo') {
+        const contourName = contourFileName(pack);
+        if (!written.has(contourName)) {
+          missing.push(layer);
+          console.warn(`Zip missing contour for ${pack.name}:`, contourName);
+          continue;
+        }
+      }
+
+      const installedBlob = await readPackBlob(fileName);
+      if (!installedBlob) {
+        if (layer === 'map') throw new Error(`Failed to write ${fileName}`);
+        missing.push(layer);
+        continue;
+      }
+      await validatePackBlob(layer, installedBlob);
+
+      let totalBytes = installedBlob.size;
+      if (layer === 'topo') {
+        const contourBlob = await readPackBlob(contourFileName(pack));
+        if (contourBlob) totalBytes += contourBlob.size;
+        clearPmtilesCache(`magene-map-${pack.id}-contour`);
+      }
+
+      const key = cacheKey(pack.id, layer);
+      clearPmtilesCache(key);
+
+      await metaPut({
+        packId: pack.id,
+        layer,
+        installed: true,
+        bytes: totalBytes,
+        updatedAt: Date.now(),
+        cacheKey: key,
+        fileName
+      });
+      installed.push(layer);
+    }
+
+    return { installed, missing };
+  } finally {
+    abortControllers.delete(packKey);
+  }
+}
+
 /** @deprecated Use installMapLayerFromZip — network CDN install removed. */
 export async function downloadMapLayer(
   pack: MapPackCatalogEntry,
@@ -666,10 +774,15 @@ export async function downloadMapLayer(
   return installMapLayerFromZip(pack, layer, undefined, onProgress);
 }
 
-export function cancelDownload(packId: string, layer: MapLayerKind): void {
-  const key = cacheKey(packId, layer);
-  abortControllers.get(key)?.abort();
-  abortControllers.delete(key);
+export function cancelDownload(packId: string, layer?: MapLayerKind): void {
+  if (layer) {
+    const key = cacheKey(packId, layer);
+    abortControllers.get(key)?.abort();
+    abortControllers.delete(key);
+  }
+  const packKey = `pack:${packId}`;
+  abortControllers.get(packKey)?.abort();
+  abortControllers.delete(packKey);
 }
 
 export async function deleteMapLayer(pack: MapPackCatalogEntry, layer: MapLayerKind): Promise<void> {

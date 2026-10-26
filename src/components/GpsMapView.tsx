@@ -1,16 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { RoutePoint } from '../types/cycling';
+import { RoutePoint, ClimbSegment, BreadcrumbPoint } from '../types/cycling';
 import { createCachedTileLayer } from '../utils/tileCache';
-import { resolveActiveBasemap, resolveActiveContour } from '../utils/mapPacks';
+import { resolveActiveBasemap, resolveActiveContour, clearAllPmtilesCaches } from '../utils/mapPacks';
 import { createContourOverlayLayer } from '../utils/contourOverlay';
 import {
   createOfflineBasemapLayer,
   loadMapDetailsPref,
   saveMapDetailsPref
 } from '../utils/offlineMapStyle';
+import { getClimbCategoryColor } from '../utils/climbProEngine';
 import { Layers, Map as MapIcon, MapPin } from 'lucide-react';
+
 
 function attachWorldOverview(map: L.Map, isDarkMode: boolean): L.Layer {
   // World overview — not a country offline pack (needs network). No country roads from app bundle.
@@ -87,11 +89,13 @@ async function attachBasemap(
 interface GpsMapViewProps {
   currentPoint: RoutePoint;
   routePoints?: RoutePoint[];
+  /** Created-route climbs — category-colored overlays (flats stay yellow). */
+  routeClimbs?: ClimbSegment[];
   /** Dashed overlay when TBT snapped to a pre-saved OSRM alternative */
   activeAltPoints?: RoutePoint[];
   heading: number;
   isDarkMode?: boolean;
-  liveBreadcrumbs?: { lat: number; lng: number }[];
+  liveBreadcrumbs?: BreadcrumbPoint[] | { lat: number; lng: number }[];
   routeName?: string;
   onLocateMe?: () => void;
   batterySaver?: boolean;
@@ -111,6 +115,7 @@ interface GpsMapViewProps {
 export const GpsMapView: React.FC<GpsMapViewProps> = ({
   currentPoint,
   routePoints = [],
+  routeClimbs = [],
   activeAltPoints,
   heading,
   isDarkMode = false,
@@ -133,6 +138,8 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const polylineBorderRef = useRef<L.Polyline | null>(null);
   const polylineCoreRef = useRef<L.Polyline | null>(null);
   const breadcrumbPolylineRef = useRef<L.Polyline | null>(null);
+  const weakBreadcrumbPolylineRef = useRef<L.Polyline | null>(null);
+  const climbPolylinesRef = useRef<L.Polyline[]>([]);
   const altPolylineRef = useRef<L.Polyline | null>(null);
   const chevronsRef = useRef<L.LayerGroup | null>(null);
   const endpointsRef = useRef<L.LayerGroup | null>(null);
@@ -142,8 +149,9 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const [activePackName, setActivePackName] = useState<string | null>(null);
   const [basemapError, setBasemapError] = useState<string | null>(null);
   const [mapDetails, setMapDetails] = useState(() => loadMapDetailsPref());
+  const [resumeToken, setResumeToken] = useState(0);
   const hasCenteredInitiallyRef = useRef<boolean>(false);
-  const pendingBreadcrumbsRef = useRef<{ lat: number; lng: number }[] | null>(null);
+  const pendingBreadcrumbsRef = useRef<(BreadcrumbPoint | { lat: number; lng: number })[] | null>(null);
   const breadcrumbRafRef = useRef<number | null>(null);
   const batterySaverRef = useRef(batterySaver);
   batterySaverRef.current = batterySaver;
@@ -275,6 +283,15 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       }).addTo(map);
       breadcrumbPolylineRef.current = breadcrumbPolyline;
 
+      // 3a. Weak / stitch trail (dimmer, keeps continuity through low GPS)
+      const weakBreadcrumbPolyline = L.polyline([], {
+        color: '#93c5fd',
+        weight: 3,
+        opacity: 0.65,
+        dashArray: '2 6'
+      }).addTo(map);
+      weakBreadcrumbPolylineRef.current = weakBreadcrumbPolyline;
+
       // 3b. Active alternate corridor (when TBT snapped off primary)
       const altPolyline = L.polyline([], {
         color: '#2563eb',
@@ -351,10 +368,46 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const lastBasemapParamsRef = useRef<{
     isDark: boolean;
     token: number;
+    resume: number;
     lat: number;
     lng: number;
     details: boolean;
   } | null>(null);
+
+  // Unlock / app-open: WebView often freezes PMTiles canvas — invalidate + re-attach
+  // shortcut: no @capacitor/app dep; visibility/pageshow/focus cover lock-unlock.
+  useEffect(() => {
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+
+    const bump = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        const map = mapInstanceRef.current;
+        if (map) {
+          try {
+            map.invalidateSize();
+          } catch {
+            /* ignore */
+          }
+        }
+        clearAllPmtilesCaches();
+        lastBasemapParamsRef.current = null;
+        setResumeToken(t => t + 1);
+      }, 400);
+    };
+
+    const onVis = () => {
+      if (document.visibilityState === 'visible') bump();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pageshow', bump);
+
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pageshow', bump);
+    };
+  }, []);
 
   // Swap day/night / pack basemap (PMTiles flavor or raster URL)
   // Only re-attach when dark mode, map token, details, or region genuinely changes — NOT on every raw coordinate tick!
@@ -370,6 +423,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       !prev ||
       prev.isDark !== isDarkMode ||
       prev.token !== basemapToken ||
+      prev.resume !== resumeToken ||
       prev.details !== mapDetails ||
       Math.abs(prev.lat - lat) > 0.5 ||
       Math.abs(prev.lng - lng) > 0.5;
@@ -378,6 +432,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     lastBasemapParamsRef.current = {
       isDark: isDarkMode,
       token: basemapToken,
+      resume: resumeToken,
       lat,
       lng,
       details: mapDetails
@@ -402,12 +457,17 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
         setOfflineMapReady(offline);
         setActivePackName(packName || null);
         setBasemapError(error || null);
+        try {
+          map.invalidateSize();
+        } catch {
+          /* ignore */
+        }
       }
     );
     return () => {
       cancelled = true;
     };
-  }, [isDarkMode, basemapToken, mapDetails, currentPoint.lat, currentPoint.lng]);
+  }, [isDarkMode, basemapToken, resumeToken, mapDetails, currentPoint.lat, currentPoint.lng]);
 
   // Helper to render start/finish markers and navigation chevrons
   const updateEndpointsAndChevrons = (map: L.Map, latLngs: [number, number][]) => {
@@ -485,6 +545,38 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     }
   }, [routePoints, isDarkMode]);
 
+  // Category-colored climb segments on created routes only
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    for (const pl of climbPolylinesRef.current) {
+      try {
+        map?.removeLayer(pl);
+      } catch {
+        /* ignore */
+      }
+    }
+    climbPolylinesRef.current = [];
+    if (!map || !routeClimbs?.length) return;
+
+    for (const climb of routeClimbs) {
+      const pts =
+        climb.points?.length > 1
+          ? climb.points.map(p => [p.lat, p.lng] as [number, number])
+          : routePoints
+              .filter(p => p.distFromStart >= climb.startDist && p.distFromStart <= climb.endDist)
+              .map(p => [p.lat, p.lng] as [number, number]);
+      if (pts.length < 2) continue;
+      const pl = L.polyline(pts, {
+        color: getClimbCategoryColor(climb.category),
+        weight: 6,
+        opacity: 0.95,
+        lineCap: 'round',
+        lineJoin: 'round'
+      }).addTo(map);
+      climbPolylinesRef.current.push(pl);
+    }
+  }, [routeClimbs, routePoints]);
+
   // Dashed overlay for active pre-saved alternative TBT corridor
   useEffect(() => {
     if (!altPolylineRef.current) return;
@@ -526,10 +618,23 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
     breadcrumbRafRef.current = requestAnimationFrame(() => {
       breadcrumbRafRef.current = null;
       const latest = pendingBreadcrumbsRef.current;
-      if (breadcrumbPolylineRef.current && latest && latest.length > 0) {
-        const pts = latest.map(b => [b.lat, b.lng] as [number, number]);
-        breadcrumbPolylineRef.current.setLatLngs(pts);
+      if (!latest?.length) {
+        breadcrumbPolylineRef.current?.setLatLngs([]);
+        weakBreadcrumbPolylineRef.current?.setLatLngs([]);
+        return;
       }
+      const good: [number, number][] = [];
+      const weak: [number, number][] = [];
+      for (const b of latest) {
+        const ll: [number, number] = [b.lat, b.lng];
+        const q = 'quality' in b ? (b as BreadcrumbPoint).quality : undefined;
+        // Full chronological path (dim) so low-signal gaps stay connected
+        weak.push(ll);
+        // Solid trail for good + stitch resume points (not weak-only)
+        if (q !== 'weak') good.push(ll);
+      }
+      breadcrumbPolylineRef.current?.setLatLngs(good);
+      weakBreadcrumbPolylineRef.current?.setLatLngs(weak);
     });
 
     return () => {

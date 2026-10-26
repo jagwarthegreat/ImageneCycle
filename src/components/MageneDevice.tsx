@@ -25,7 +25,7 @@ import {
   X
 } from 'lucide-react';
 
-import { RoutePoint, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert, RouteTurn, RouteAlternative } from '../types/cycling';
+import { RoutePoint, ClimbSegment, RideMetrics, ClimbProLiveState, BleDeviceStatus, GpsStatus, AutoLapAlert, RouteTurn, RouteAlternative, BreadcrumbPoint } from '../types/cycling';
 import { WeatherData } from '../services/weatherService';
 import {
   getRouteRemainingDistanceMeters,
@@ -53,6 +53,8 @@ interface MageneDeviceProps {
   climbState: ClimbProLiveState;
   currentPoint: RoutePoint;
   routePoints?: RoutePoint[];
+  /** Created-route climbs for category-colored map overlays */
+  routeClimbs?: ClimbSegment[];
   /** Elevation / ClimbPro profile (planned route or free-ride samples). Falls back to routePoints. */
   climbProfilePoints?: RoutePoint[];
   routeTurns?: RouteTurn[];
@@ -70,7 +72,7 @@ interface MageneDeviceProps {
   onToggleSound: () => void;
   onOpenSensorModal: () => void;
   onOpenMenuDrawer: () => void;
-  liveBreadcrumbs?: { lat: number; lng: number }[];
+  liveBreadcrumbs?: BreadcrumbPoint[] | { lat: number; lng: number }[];
   routeName?: string;
   onLocateMe?: () => void;
   latestLapAlert?: AutoLapAlert | null;
@@ -143,6 +145,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   climbState,
   currentPoint,
   routePoints = [],
+  routeClimbs = [],
   climbProfilePoints,
   routeTurns = [],
   routeAlternatives = [],
@@ -602,6 +605,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
               <GpsMapView
                 currentPoint={currentPoint}
                 routePoints={routePoints}
+                routeClimbs={routeClimbs}
                 activeAltPoints={activeAltPoints}
                 heading={metrics.currentHeading}
                 isDarkMode={isDarkMode}
@@ -1018,6 +1022,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
               <GpsMapView
                 currentPoint={currentPoint}
                 routePoints={routePoints}
+                routeClimbs={routeClimbs}
                 activeAltPoints={activeAltPoints}
                 heading={metrics.currentHeading}
                 isDarkMode={isDarkMode}

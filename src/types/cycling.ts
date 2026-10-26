@@ -100,6 +100,8 @@ export interface BreadcrumbPoint {
   distance?: number;
   /** Ambient temp °C for GPX gpxtpx:atemp */
   temperature?: number;
+  /** Trail continuity: weak GPS / stitch segment (omit or good = solid trail) */
+  quality?: 'good' | 'weak' | 'stitch';
 }
 
 export interface ActiveRideSession {

@@ -30,6 +30,24 @@ export function getClimbCategory(score: number): ClimbCategory {
   return 'Uncategorized';
 }
 
+/** Map polyline colors by climb category (flats stay yellow course line). */
+export function getClimbCategoryColor(category: ClimbCategory | string): string {
+  switch (category) {
+    case '4':
+      return '#22c55e';
+    case '3':
+      return '#eab308';
+    case '2':
+      return '#f97316';
+    case '1':
+      return '#ef4444';
+    case 'HC':
+      return '#c026d3';
+    default:
+      return '#facc15';
+  }
+}
+
 /**
  * Splits points into colored profile slices based on gradient segments.
  */

@@ -7,20 +7,22 @@ import { bleManager } from './utils/bleManager';
 import { antManager } from './utils/antManager';
 import { gpsService, GpsFix, accuracyToQuality, FAST_GEO_OPTIONS } from './utils/gpsService';
 import { bikeBeeper } from './utils/audioAlerts';
-import { getPowerZoneInfo, getHeartRateZoneInfo, POWER_ZONES_CONFIG, HR_ZONES_CONFIG } from './utils/powerZones';
+import { rideNarrator } from './utils/rideNarrator';
+import { shouldAppendWeakBreadcrumb, shouldStitchBreadcrumb } from './utils/breadcrumbContinuity';
+import { getNextTurn } from './utils/routeEncode';
+import { getPowerZoneInfo, getHeartRateZoneInfo } from './utils/powerZones';
 import { loadRideHistory, saveRideToHistory, deleteRideFromHistory, clearRideHistory, loadActiveSession, saveActiveSession, clearActiveSession } from './utils/rideHistory';
-import { exportRideToFit, exportRideToGpx, exportRideToJson, openStravaUpload, formatExportNotice } from './utils/rideExport';
 import { fetchLiveWeather, WeatherData } from './services/weatherService';
-import { captureStravaRedirectTokens, isStravaConnected, startStravaConnect, clearStravaTokens } from './utils/stravaAuth';
+import { captureStravaRedirectTokens, isStravaConnected } from './utils/stravaAuth';
 import { loadUserRoutes, loadUserRoutesAsync, saveUserRoute, deleteUserRoute } from './utils/routeLibrary';
-import { OFFLINE_MAP_LABEL, probeOfflineMapAvailable } from './utils/offlineMap';
+import { probeOfflineMapAvailable } from './utils/offlineMap';
 import { freeRideClimbRecorder } from './utils/freeRideClimbRecorder';
 import { getRouteElevation, correctEllipsoidalAltitude, fetchDemElevation } from './utils/elevationService';
 import { MageneDevice } from './components/MageneDevice';
+import { MenuSheet } from './components/MenuSheet';
 import { BleSensorModal } from './components/BleSensorModal';
 import { ClimbManualInputModal } from './components/ClimbManualInputModal';
 import { RideSummaryModal } from './components/RideSummaryModal';
-import { HistoryRideMap } from './components/HistoryRideMap';
 import {
   stopRecordingNotification,
   syncRecordingNotification,
@@ -36,36 +38,6 @@ import { StartActivityPrompt } from './components/StartActivityPrompt';
 import { RouteBuilderModal } from './components/RouteBuilderModal';
 import { DownloadMapsModal } from './components/DownloadMapsModal';
 import { MapsStorageModal } from './components/MapsStorageModal';
-import { 
-  X, 
-  Upload, 
-  Bluetooth, 
-  Mountain, 
-  Compass, 
-  RotateCcw, 
-  Camera,
-  CheckCircle2,
-  Navigation2,
-  History,
-  Zap,
-  Trash2,
-  Clock,
-  TrendingUp,
-  Sliders,
-  Check,
-  Play,
-  Square,
-  MapPin,
-  Crosshair,
-  Flag,
-  Share2,
-  Download,
-  ExternalLink,
-  Battery,
-  Heart,
-  Map,
-  HardDrive
-} from 'lucide-react';
 
 interface MonotonicSessionBuffer {
   id: string;
@@ -332,8 +304,7 @@ export default function App() {
   // Sound & Drawer Menu
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [isMenuDrawerOpen, setIsMenuDrawerOpen] = useState<boolean>(false);
-  const [drawerTab, setDrawerTab] = useState<'routes' | 'history' | 'profile'>('routes');
-
+  
   // Smart Auto-Lap Settings (5000m = 5km, 10000m = 10km, 0 = Off)
   const [autoLapDistance, setAutoLapDistance] = useState<number>(() => {
     if (typeof window === 'undefined') return 5000;
@@ -505,9 +476,10 @@ export default function App() {
     currentHeading
   ]);
 
-  // Sound sync
+  // Sound sync (beeps + voice)
   useEffect(() => {
     bikeBeeper.enabled = soundEnabled;
+    rideNarrator.enabled = soundEnabled;
   }, [soundEnabled]);
 
   // Persist FTP
@@ -734,7 +706,7 @@ export default function App() {
         gpsSpeedRef.current = fix.speedKmh;
         applyAutoPauseRef.current();
 
-        // Weak / display-only: map puck + HUD only (auto-pause already ticked above)
+        // Weak / display-only: puck + HUD; thinned trail (no distance) for continuity
         if (fix.displayOnly) {
           if (fix.heading) setCurrentHeading(fix.heading);
           if (fix.altitude > 0) {
@@ -744,6 +716,35 @@ export default function App() {
               if (rEle !== null) ele = rEle;
             }
             setCurrentElevation(Math.round(ele));
+          }
+
+          const curSessionId = activeSessionRef.current?.id;
+          const trackingSessionId = gpsService.getTrackingSessionId();
+          const isSessionValid = Boolean(curSessionId && trackingSessionId === curSessionId);
+          if (isRecordingRef.current && !isPausedRef.current && isSessionValid) {
+            const buf = sessionBufferRef.current;
+            const last =
+              buf && buf.id === curSessionId
+                ? buf.breadcrumbs[buf.breadcrumbs.length - 1] || null
+                : null;
+            const weakFix = { lat: fix.lat, lng: fix.lng, time: Date.now() };
+            if (shouldAppendWeakBreadcrumb(last, weakFix)) {
+              const weakCrumb: BreadcrumbPoint = {
+                lat: fix.lat,
+                lng: fix.lng,
+                ele: fix.altitude > 0 ? fix.altitude : undefined,
+                time: weakFix.time,
+                speed: fix.speedKmh,
+                distance: distanceTraveledRef.current,
+                quality: 'weak'
+              };
+              if (sessionBufferRef.current && sessionBufferRef.current.id === curSessionId) {
+                sessionBufferRef.current.breadcrumbs.push(weakCrumb);
+                setLiveBreadcrumbs(sessionBufferRef.current.breadcrumbs.slice());
+              } else {
+                setLiveBreadcrumbs(prev => [...prev, weakCrumb]);
+              }
+            }
           }
           return;
         }
@@ -774,27 +775,37 @@ export default function App() {
         if (isRecordingRef.current && !isPausedRef.current && deltaDist > 0 && isSessionValid) {
           nextDist = distanceTraveledRef.current + deltaDist;
           distanceTraveledRef.current = nextDist;
+          const now = Date.now();
+          const buf = sessionBufferRef.current;
+          const last =
+            buf && buf.id === curSessionId
+              ? buf.breadcrumbs[buf.breadcrumbs.length - 1] || null
+              : null;
+          const pushCrumb = (crumb: BreadcrumbPoint) => {
+            if (sessionBufferRef.current && sessionBufferRef.current.id === curSessionId) {
+              sessionBufferRef.current.distanceMeters = Math.max(sessionBufferRef.current.distanceMeters, nextDist);
+              sessionBufferRef.current.breadcrumbs.push(crumb);
+              sessionBufferRef.current.maxSpeedKmh = Math.max(sessionBufferRef.current.maxSpeedKmh, fix.speedKmh);
+              setLiveBreadcrumbs(sessionBufferRef.current.breadcrumbs.slice());
+            } else {
+              setLiveBreadcrumbs(prev => [...prev, crumb]);
+            }
+          };
+          const stitch = shouldStitchBreadcrumb(last, { lat: fix.lat, lng: fix.lng, time: now });
           const newBreadcrumb: BreadcrumbPoint = {
             lat: fix.lat,
             lng: fix.lng,
             ele: fix.altitude > 0 ? fix.altitude : undefined,
-            time: Date.now(),
+            time: now,
             speed: fix.speedKmh,
             power: powerRef.current ?? undefined,
             cadence: cadenceRef.current ?? undefined,
             heartRate: heartRateRef.current ?? undefined,
             distance: nextDist,
-            temperature: weatherRef.current?.tempC
+            temperature: weatherRef.current?.tempC,
+            quality: stitch ? 'stitch' : 'good'
           };
-
-          if (sessionBufferRef.current && sessionBufferRef.current.id === curSessionId) {
-            sessionBufferRef.current.distanceMeters = Math.max(sessionBufferRef.current.distanceMeters, nextDist);
-            sessionBufferRef.current.breadcrumbs.push(newBreadcrumb);
-            sessionBufferRef.current.maxSpeedKmh = Math.max(sessionBufferRef.current.maxSpeedKmh, fix.speedKmh);
-            setLiveBreadcrumbs(sessionBufferRef.current.breadcrumbs.slice());
-          } else {
-            setLiveBreadcrumbs(prev => [...prev, newBreadcrumb]);
-          }
+          pushCrumb(newBreadcrumb);
           setDistanceTraveled(nextDist);
         }
 
@@ -1055,6 +1066,31 @@ export default function App() {
     prevClimbInRef.current = climbState.isInClimb;
   }, [climbState.isInClimb]);
 
+  // Voice: upcoming climb + turn-by-turn distance cues (created routes)
+  useEffect(() => {
+    if (!isRecording || isPaused || !activeRoute) return;
+    const next = climbState.nextClimb || climbState.currentClimb;
+    if (next) {
+      rideNarrator.tickClimb({
+        climbKey: next.id || String(next.startDist),
+        category: next.category,
+        distToNextClimb: climbState.distToNextClimb,
+        isInClimb: climbState.isInClimb
+      });
+    }
+    const cue = getNextTurn(activeRoute.turns, distanceTraveled);
+    rideNarrator.tickTurn(cue);
+  }, [
+    isRecording,
+    isPaused,
+    activeRoute,
+    climbState.nextClimb,
+    climbState.currentClimb,
+    climbState.distToNextClimb,
+    climbState.isInClimb,
+    distanceTraveled
+  ]);
+
   // Real-Time Power & HR Zone Calculation
   const powerZoneInfo = useMemo(() => {
     return getPowerZoneInfo(power, ftp);
@@ -1126,6 +1162,7 @@ export default function App() {
   const beginNewActivitySession = (customRouteName?: string) => {
     manualPausedRef.current = false;
     autoPauseStateRef.current = { lowSpeedSince: null, isAutoPaused: false };
+    rideNarrator.reset();
     const newSession: ActiveRideSession = {
       id: `session-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       startedAt: Date.now(),
@@ -1568,6 +1605,7 @@ export default function App() {
           climbState={climbState}
           currentPoint={currentPoint}
           routePoints={activeRoute ? activeRoute.points : []}
+          routeClimbs={activeRoute?.climbs || []}
           climbProfilePoints={
             activeRoute?.points?.length
               ? activeRoute.points
@@ -1606,913 +1644,60 @@ export default function App() {
         />
       </div>
 
-      {/* DISCREET SLIDE-OVER MENU DRAWER (Portal to body at z-[99999] so map never overlaps) */}
-      {isMenuDrawerOpen && typeof document !== 'undefined' && createPortal(
-        <div className="fixed inset-0 z-[99999] flex justify-start bg-black/75 animate-in fade-in duration-200" style={{ zIndex: 99999 }}>
-          <div
-            className="w-full max-w-sm h-full bg-zinc-900 border-r border-zinc-800 flex flex-col text-zinc-100 shadow-2xl relative z-10"
-            style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
-          >
-            {/* Sticky header */}
-            <div className="shrink-0 px-4 pt-4 pb-3 border-b border-zinc-800">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shrink-0">
-                    <Navigation2 className="w-5 h-5 text-white" />
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="font-sports font-bold text-lg tracking-wide text-white truncate">
-                      ImageneCycle
-                    </h3>
-                    <p className="text-sm text-zinc-400">Menu</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsMenuDrawerOpen(false)}
-                  className="min-w-11 min-h-11 flex items-center justify-center rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                  aria-label="Close menu"
-                >
-                  <X className="w-6 h-6" />
-                </button>
-              </div>
-
-              {/* Sticky tabs */}
-              <div className="grid grid-cols-3 gap-1 mt-4 p-1 rounded-xl bg-zinc-800 text-sm font-sports font-bold">
-                <button
-                  type="button"
-                  onClick={() => setDrawerTab('routes')}
-                  className={`min-h-12 rounded-lg flex items-center justify-center gap-1.5 px-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                    drawerTab === 'routes' ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  <Navigation2 className="w-4 h-4 shrink-0" />
-                  <span>Ride</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDrawerTab('history')}
-                  className={`min-h-12 rounded-lg flex items-center justify-center gap-1.5 px-1 transition-colors relative focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                    drawerTab === 'history' ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  <History className="w-4 h-4 shrink-0" />
-                  <span>History</span>
-                  {rideHistory.length > 0 && (
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 absolute top-2 right-2" aria-hidden />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDrawerTab('profile')}
-                  className={`min-h-12 rounded-lg flex items-center justify-center gap-1.5 px-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                    drawerTab === 'profile' ? 'bg-blue-600 text-white' : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  <Sliders className="w-4 h-4 shrink-0" />
-                  <span>Settings</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Scrollable body */}
-            <div className="flex-1 overflow-y-auto px-4 py-4">
-              {/* TAB 1: Ride */}
-              {drawerTab === 'routes' && (
-                <div className="space-y-5">
-                  {/* 1. Ride status */}
-                  <section className="rounded-xl bg-zinc-800/80 border border-zinc-700 p-4 font-sports">
-                    {activeRoute ? (
-                      <div>
-                        <button
-                          type="button"
-                          onClick={() => activateRouteAsCurrentRide(activeRoute.id)}
-                          className="w-full text-left rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs text-zinc-400 uppercase font-bold tracking-wide">Course loaded</span>
-                            <span className="text-sm text-blue-400 font-bold shrink-0">
-                              {(activeRoute.totalDistance / 1000).toFixed(1)} km
-                            </span>
-                          </div>
-                          <div className="font-bold text-white text-base mt-1 truncate">
-                            {activeRoute.name}
-                          </div>
-                          <div className="text-sm text-zinc-400 mt-1">
-                            +{activeRoute.totalElevationGain} m · {activeRoute.climbs.length} climbs
-                          </div>
-                          <div className="text-sm text-blue-400 font-bold mt-2">
-                            Tap to show course on map
-                          </div>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleClearRoute}
-                          className="mt-3 w-full min-h-12 px-3 rounded-xl bg-zinc-900 hover:bg-rose-950/60 border border-zinc-700 hover:border-rose-600/50 text-zinc-300 hover:text-rose-400 text-sm font-bold transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          <span>Clear route (free ride)</span>
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
-                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-                          <span>Free ride</span>
-                        </div>
-                        <p className="text-sm text-zinc-400 leading-relaxed">
-                          Live GPS with ClimbPro. Create a route to load a planned course.
-                        </p>
-                      </div>
-                    )}
-                  </section>
-
-                  {/* 2. Primary actions */}
-                  <section className="space-y-3">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsMenuDrawerOpen(false);
-                        setIsRouteBuilderOpen(true);
-                      }}
-                      className="w-full min-h-12 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-sports font-bold text-base flex items-center justify-center gap-2 shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-                    >
-                      <Flag className="w-5 h-5" />
-                      <span>Create route</span>
-                    </button>
-
-                    {routes.length > 0 && (
-                      <div className="space-y-2">
-                        <h4 className="text-sm text-zinc-400 font-sports font-bold">Saved routes</h4>
-                        {routes.map(r => (
-                          <div
-                            key={r.id}
-                            className={`p-3 rounded-xl border ${
-                              selectedRouteId === r.id
-                                ? 'bg-blue-950/40 border-blue-500/50'
-                                : 'bg-zinc-800/80 border-zinc-700'
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => handleUseSavedRoute(r.id)}
-                              className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-lg"
-                            >
-                              <div className="font-bold text-zinc-100 text-base truncate">{r.name}</div>
-                              <div className="text-sm text-zinc-400 font-mono mt-1">
-                                {(r.totalDistance / 1000).toFixed(1)} km · +{r.totalElevationGain} m · {r.climbs.length} climbs
-                              </div>
-                            </button>
-                            <div className="flex gap-2 mt-3">
-                              <button
-                                type="button"
-                                onClick={() => handleUseSavedRoute(r.id)}
-                                className="flex-1 min-h-12 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-                              >
-                                Use as ride
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteSavedRoute(r.id)}
-                                className="min-w-12 min-h-12 rounded-xl bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-rose-400 flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
-                                aria-label={`Delete route ${r.name}`}
-                              >
-                                <Trash2 className="w-5 h-5" />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </section>
-
-                  {/* 3. Compact GPS */}
-                  <section className="rounded-xl bg-zinc-800/80 border border-zinc-700 p-4 space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-sports font-bold text-white text-sm flex items-center gap-2">
-                        <MapPin className="w-5 h-5 text-blue-400 shrink-0" />
-                        GPS
-                      </span>
-                      <span className="text-sm font-sports font-bold text-emerald-400">
-                        {gpsStatus.quality || 'GPS 3D'} (±{gpsStatus.accuracy || 4}m)
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 font-mono text-sm text-zinc-300">
-                      <div>
-                        <span className="text-xs text-zinc-500 block font-sports font-bold">Latitude</span>
-                        <span className="font-bold text-white">{currentCoords.lat ? currentCoords.lat.toFixed(5) : '--'}°</span>
-                      </div>
-                      <div>
-                        <span className="text-xs text-zinc-500 block font-sports font-bold">Longitude</span>
-                        <span className="font-bold text-white">{currentCoords.lng ? currentCoords.lng.toFixed(5) : '--'}°</span>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleLocateMe}
-                      className="w-full min-h-12 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-sports font-bold text-sm flex items-center justify-center gap-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-                    >
-                      <Crosshair className="w-5 h-5" />
-                      <span>Center on me</span>
-                    </button>
-                  </section>
-
-                  {/* 4. Tools */}
-                  <section className="space-y-2">
-                    <h4 className="text-sm text-zinc-400 font-sports font-bold">Tools</h4>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsMenuDrawerOpen(false);
-                        setIsSensorModalOpen(true);
-                      }}
-                      className="w-full min-h-14 px-3 rounded-xl bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700 flex items-center gap-3 text-left font-sports transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                    >
-                      <Bluetooth className="w-5 h-5 text-blue-400 shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-zinc-100 font-bold text-base">BLE sensors</div>
-                        <div className="text-sm text-zinc-400">Heart rate, speed & power</div>
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsMenuDrawerOpen(false);
-                        setIsClimbModalOpen(true);
-                      }}
-                      className="w-full min-h-14 px-3 rounded-xl bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700 flex items-center gap-3 text-left font-sports transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                    >
-                      <Mountain className="w-5 h-5 text-amber-400 shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-zinc-100 font-bold text-base">Manual climb</div>
-                        <div className="text-sm text-zinc-400">Customize gradient profile</div>
-                      </div>
-                    </button>
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      onChange={handleFileUpload}
-                      accept=".gpx,.xml"
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-full min-h-14 px-3 rounded-xl bg-zinc-800/80 hover:bg-zinc-800 border border-zinc-700 flex items-center gap-3 text-left font-sports transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                    >
-                      <Upload className="w-5 h-5 text-blue-400 shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-zinc-100 font-bold text-base">Upload GPX</div>
-                        <div className="text-sm text-zinc-400">Import a custom track</div>
-                      </div>
-                    </button>
-                  </section>
-
-                  {/* 5. Map & laps */}
-                  <section className="space-y-3">
-                    <h4 className="text-sm text-zinc-400 font-sports font-bold flex items-center gap-2">
-                      <Compass className="w-4 h-4 text-blue-400" />
-                      Map & laps
-                    </h4>
-
-                    <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-zinc-800/80 border border-zinc-700 min-h-14">
-                      <div className="min-w-0 pr-2">
-                        <div className="font-sports font-bold text-white text-base">Auto-center map</div>
-                        <p className="text-sm text-zinc-400 mt-0.5">Follows your position</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleToggleAutoCenter}
-                        className={`min-w-16 min-h-11 px-3 rounded-xl font-sports font-bold text-sm border transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                          autoCenter
-                            ? 'bg-blue-600 border-blue-500 text-white'
-                            : 'bg-zinc-900 border-zinc-700 text-zinc-400'
-                        }`}
-                      >
-                        {autoCenter ? 'ON' : 'OFF'}
-                      </button>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-zinc-800/80 border border-zinc-700 min-h-14">
-                      <div className="min-w-0 pr-2">
-                        <div className="font-sports font-bold text-white text-base">Invert heading</div>
-                        <p className="text-sm text-zinc-400 mt-0.5">For reverse / handlebar mounts</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleToggleInvertHeading}
-                        className={`min-w-16 min-h-11 px-3 rounded-xl font-sports font-bold text-sm border transition-colors shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${
-                          invertHeading
-                            ? 'bg-amber-600 border-amber-500 text-white'
-                            : 'bg-zinc-900 border-zinc-700 text-zinc-400'
-                        }`}
-                      >
-                        {invertHeading ? 'ON' : 'OFF'}
-                      </button>
-                    </div>
-
-                    <div className="rounded-xl bg-zinc-800/80 border border-zinc-700 p-4 space-y-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-sports font-bold text-white text-base flex items-center gap-2">
-                          <Flag className="w-5 h-5 text-blue-400" />
-                          Auto-lap
-                        </span>
-                        <span className="text-sm font-sports font-bold text-blue-400">
-                          {autoLapDistance === 5000 ? '5 km' : autoLapDistance === 10000 ? '10 km' : 'Off'}
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-3 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => handleSetAutoLapDistance(5000)}
-                          className={`min-h-12 rounded-xl font-sports font-bold text-sm transition-colors flex items-center justify-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                            autoLapDistance === 5000
-                              ? 'bg-blue-600 text-white'
-                              : 'bg-zinc-900 text-zinc-400 border border-zinc-700'
-                          }`}
-                        >
-                          {autoLapDistance === 5000 && <Check className="w-4 h-4" />}
-                          <span>5 km</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleSetAutoLapDistance(10000)}
-                          className={`min-h-12 rounded-xl font-sports font-bold text-sm transition-colors flex items-center justify-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
-                            autoLapDistance === 10000
-                              ? 'bg-blue-600 text-white'
-                              : 'bg-zinc-900 text-zinc-400 border border-zinc-700'
-                          }`}
-                        >
-                          {autoLapDistance === 10000 && <Check className="w-4 h-4" />}
-                          <span>10 km</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleSetAutoLapDistance(0)}
-                          className={`min-h-12 rounded-xl font-sports font-bold text-sm transition-colors flex items-center justify-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
-                            autoLapDistance === 0
-                              ? 'bg-rose-600 text-white'
-                              : 'bg-zinc-900 text-zinc-400 border border-zinc-700'
-                          }`}
-                        >
-                          {autoLapDistance === 0 && <Check className="w-4 h-4" />}
-                          <span>Off</span>
-                        </button>
-                      </div>
-                    </div>
-                  </section>
-                </div>
-              )}
-
-              {/* TAB 2: History */}
-              {drawerTab === 'history' && (
-                <div className="space-y-5">
-                  {activeSession && (
-                    <section className="bg-emerald-950/40 border border-emerald-500/50 rounded-xl p-4 font-sports">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
-                          <span className={`w-2.5 h-2.5 rounded-full ${isPaused ? 'bg-amber-400' : 'bg-emerald-400 animate-ping'}`} />
-                          <span>{isPaused ? 'Paused' : 'Recording'}</span>
-                        </div>
-                        <span className="text-xs font-mono text-zinc-400">
-                          {activeSession.id.slice(-6)}
-                        </span>
-                      </div>
-                      <div className="font-bold text-zinc-100 text-base mt-2 truncate">
-                        {activeSession.routeName}
-                      </div>
-
-                      <div className="grid grid-cols-3 gap-2 font-digital text-sm bg-zinc-900/80 p-3 rounded-xl mt-3">
-                        <div>
-                          <span className="text-xs font-sports text-zinc-500 block">Riding</span>
-                          <span className="font-bold text-emerald-400">
-                            {Math.floor((ridingTime || timeElapsed) / 60)}m {(ridingTime || timeElapsed) % 60}s
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-xs font-sports text-zinc-500 block">Saddle</span>
-                          <span className="font-bold text-zinc-300">
-                            {Math.floor((saddleTime || timeElapsed) / 60)}m {(saddleTime || timeElapsed) % 60}s
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-xs font-sports text-zinc-500 block">Dist</span>
-                          <span className="font-bold text-white">
-                            {(distanceTraveled / 1000).toFixed(2)} km
-                          </span>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsMenuDrawerOpen(false);
-                          handleStopActivity();
-                        }}
-                        className="mt-4 w-full min-h-12 px-3 bg-rose-600 hover:bg-rose-500 text-white font-sports font-bold text-sm rounded-xl transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400"
-                      >
-                        <Square className="w-4 h-4 fill-current" />
-                        <span>Finish & save</span>
-                      </button>
-                    </section>
-                  )}
-
-                  <div className="flex items-center justify-between gap-3 pb-1 border-b border-zinc-800">
-                    <h4 className="font-sports font-bold text-sm text-zinc-400">
-                      Past rides ({rideHistory.length})
-                    </h4>
-                    {rideHistory.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={handleClearAllHistory}
-                        className="min-h-11 px-2 text-sm text-red-400 hover:text-red-300 font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 rounded-lg"
-                      >
-                        Clear all
-                      </button>
-                    )}
-                  </div>
-
-                  {historyExportNotice && (
-                    <div className="text-sm text-emerald-300 bg-emerald-950/40 border border-emerald-800/50 rounded-xl px-3 py-2">
-                      {historyExportNotice}
-                    </div>
-                  )}
-
-                  {rideHistory.length === 0 ? (
-                    <div className="p-6 bg-zinc-800/50 rounded-xl text-center text-sm text-zinc-500">
-                      <History className="w-8 h-8 mx-auto mb-2 text-zinc-600" />
-                      <p className="text-base text-zinc-400">No rides saved yet</p>
-                      <p className="text-sm text-zinc-500 mt-2">
-                        Finished rides appear here automatically.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {rideHistory.map(ride => {
-                        const m = Math.floor(ride.timeElapsed / 60);
-                        const s = ride.timeElapsed % 60;
-                        const timeStr = `${m}m ${s}s`;
-
-                        return (
-                          <div
-                            key={ride.id}
-                            className="bg-zinc-800/80 border border-zinc-700 rounded-xl p-4 font-sports"
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <button
-                                type="button"
-                                className="truncate text-left text-base font-bold text-zinc-100 hover:text-emerald-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 rounded"
-                                title="View ride map"
-                                onClick={() =>
-                                  setHistoryMapRideId(prev => (prev === ride.id ? null : ride.id))
-                                }
-                              >
-                                {ride.routeName}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteHistoryItem(ride.id)}
-                                className="min-w-11 min-h-11 flex items-center justify-center text-zinc-500 hover:text-red-400 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
-                                aria-label={`Delete ride ${ride.routeName}`}
-                              >
-                                <Trash2 className="w-5 h-5" />
-                              </button>
-                            </div>
-
-                            <div className="text-sm text-zinc-400 mt-1 mb-3">
-                              {ride.dateFormatted}
-                            </div>
-
-                            <div className="grid grid-cols-3 gap-2 font-digital text-sm bg-zinc-900/60 p-3 rounded-xl">
-                              <div>
-                                <span className="text-xs font-sports text-zinc-500 block">Dist</span>
-                                <span className="font-bold">{(ride.distanceMeters / 1000).toFixed(2)} km</span>
-                              </div>
-                              <div>
-                                <span className="text-xs font-sports text-zinc-500 block">Gain</span>
-                                <span className="font-bold text-emerald-400">+{ride.totalAscentMeters}m</span>
-                              </div>
-                              <div>
-                                <span className="text-xs font-sports text-zinc-500 block">Time</span>
-                                <span className="font-bold text-blue-400">{timeStr}</span>
-                              </div>
-                            </div>
-
-                            {historyMapRideId === ride.id && (
-                              <div className="mt-3">
-                                <HistoryRideMap
-                                  breadcrumbs={ride.breadcrumbs || []}
-                                  className="h-[140px] w-full"
-                                />
-                              </div>
-                            )}
-
-                            <div className="mt-3 pt-3 border-t border-zinc-700 grid grid-cols-2 gap-2">
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    const result = await exportRideToFit({
-                                      routeName: ride.routeName,
-                                      startedAt: ride.startedAt || ride.timestamp,
-                                      timeElapsed: ride.timeElapsed,
-                                      ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
-                                      saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
-                                      distanceMeters: ride.distanceMeters,
-                                      totalAscentMeters: ride.totalAscentMeters,
-                                      avgSpeedKmh: ride.avgSpeedKmh,
-                                      maxSpeedKmh: ride.maxSpeedKmh,
-                                      calories: ride.calories,
-                                      avgPowerWatts: ride.avgPowerWatts,
-                                      avgCadenceRpm: ride.avgCadenceRpm,
-                                      avgHeartRateBpm: ride.avgHeartRateBpm,
-                                      breadcrumbs: ride.breadcrumbs || []
-                                    });
-                                    setHistoryExportNotice(formatExportNotice(result, 'FIT'));
-                                  } catch (err) {
-                                    setHistoryExportNotice(err instanceof Error ? err.message : 'FIT export failed');
-                                  }
-                                  setTimeout(() => setHistoryExportNotice(null), 4000);
-                                }}
-                                className="min-h-12 rounded-xl bg-emerald-950/40 hover:bg-emerald-900/60 border border-emerald-700/60 text-emerald-300 font-sports font-bold text-sm transition-colors flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                                title="Export FIT 2.0"
-                              >
-                                <Download className="w-4 h-4" />
-                                <span>FIT</span>
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    const result = await exportRideToGpx({
-                                      routeName: ride.routeName,
-                                      startedAt: ride.startedAt || ride.timestamp,
-                                      timeElapsed: ride.timeElapsed,
-                                      ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
-                                      saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
-                                      distanceMeters: ride.distanceMeters,
-                                      totalAscentMeters: ride.totalAscentMeters,
-                                      avgSpeedKmh: ride.avgSpeedKmh,
-                                      maxSpeedKmh: ride.maxSpeedKmh,
-                                      calories: ride.calories,
-                                      breadcrumbs: ride.breadcrumbs || []
-                                    });
-                                    setHistoryExportNotice(formatExportNotice(result, 'GPX'));
-                                  } catch (err) {
-                                    setHistoryExportNotice(err instanceof Error ? err.message : 'GPX export failed');
-                                  }
-                                  setTimeout(() => setHistoryExportNotice(null), 4000);
-                                }}
-                                className="min-h-12 rounded-xl bg-zinc-900 hover:bg-blue-900/50 border border-zinc-700 text-zinc-200 font-sports font-bold text-sm transition-colors flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                                title="Export GPX"
-                              >
-                                <Download className="w-4 h-4 text-blue-400" />
-                                <span>GPX</span>
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    const result = await exportRideToJson({
-                                      routeName: ride.routeName,
-                                      startedAt: ride.startedAt || ride.timestamp,
-                                      timeElapsed: ride.timeElapsed,
-                                      ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
-                                      saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
-                                      distanceMeters: ride.distanceMeters,
-                                      totalAscentMeters: ride.totalAscentMeters,
-                                      avgSpeedKmh: ride.avgSpeedKmh,
-                                      maxSpeedKmh: ride.maxSpeedKmh,
-                                      calories: ride.calories,
-                                      breadcrumbs: ride.breadcrumbs || []
-                                    });
-                                    setHistoryExportNotice(formatExportNotice(result, 'JSON'));
-                                  } catch (err) {
-                                    setHistoryExportNotice(err instanceof Error ? err.message : 'JSON export failed');
-                                  }
-                                  setTimeout(() => setHistoryExportNotice(null), 4000);
-                                }}
-                                className="min-h-12 rounded-xl bg-zinc-900 hover:bg-zinc-700 text-zinc-200 font-sports font-bold text-sm transition-colors flex items-center justify-center gap-1.5 border border-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
-                                title="Export JSON"
-                              >
-                                <Share2 className="w-4 h-4 text-emerald-400" />
-                                <span>JSON</span>
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={() => openStravaUpload()}
-                                className="min-h-12 rounded-xl bg-[#FC4C02]/20 hover:bg-[#FC4C02]/30 text-[#FC4C02] border border-[#FC4C02]/40 font-sports font-bold text-sm transition-colors flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FC4C02]"
-                                title="Open Strava upload"
-                              >
-                                <span>Strava</span>
-                                <ExternalLink className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* TAB 3: Settings */}
-              {drawerTab === 'profile' && (
-                <div className="space-y-5 font-sports">
-                  {/* Offline maps first */}
-                  <section className="bg-zinc-800/80 p-4 rounded-xl border border-zinc-700 space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-white text-base flex items-center gap-2">
-                        <Map className="w-5 h-5 text-emerald-400" />
-                        Offline maps
-                      </span>
-                      <span className={`text-sm font-bold ${
-                        offlineMapAvailable === true
-                          ? 'text-emerald-400'
-                          : offlineMapAvailable === false
-                          ? 'text-amber-400'
-                          : 'text-zinc-500'
-                      }`}>
-                        {offlineMapAvailable === true
-                          ? 'Pack installed'
-                          : offlineMapAvailable === false
-                          ? 'World only'
-                          : '…'}
-                      </span>
-                    </div>
-                    <p className="text-sm text-zinc-400 leading-relaxed">
-                      {OFFLINE_MAP_LABEL} (OpenStreetMap). Download a country for offline detail. Guru packs not supported.
-                    </p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsMenuDrawerOpen(false);
-                          setIsDownloadMapsOpen(true);
-                        }}
-                        className="min-h-12 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-sports font-bold text-sm flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-                      >
-                        <Download className="w-4 h-4" />
-                        Download
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsMenuDrawerOpen(false);
-                          setIsMapsStorageOpen(true);
-                        }}
-                        className="min-h-12 rounded-xl bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-zinc-200 font-sports font-bold text-sm flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
-                      >
-                        <HardDrive className="w-4 h-4 text-emerald-400" />
-                        Storage
-                      </button>
-                    </div>
-                  </section>
-
-                  {/* Battery Saver */}
-                  <section className="bg-zinc-800/80 p-4 rounded-xl border border-zinc-700 space-y-3">
-                    <div className="flex items-center justify-between gap-3 min-h-11">
-                      <span className="font-bold text-white text-base flex items-center gap-2">
-                        <Battery className="w-5 h-5 text-emerald-400" />
-                        Battery saver
-                      </span>
-                      <button
-                        type="button"
-                        onClick={handleToggleBatterySaver}
-                        className={`min-w-16 min-h-11 px-3 rounded-xl font-bold text-sm border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${
-                          batterySaver
-                            ? 'bg-emerald-600 border-emerald-500 text-white'
-                            : 'bg-zinc-900 border-zinc-700 text-zinc-400'
-                        }`}
-                      >
-                        {batterySaver ? 'ON' : 'OFF'}
-                      </button>
-                    </div>
-                    <p className="text-sm text-zinc-400">
-                      Reduces map motion and GPS polling on long rides.
-                    </p>
-                  </section>
-
-                  {/* Strava */}
-                  <section className="bg-zinc-800/80 p-4 rounded-xl border border-zinc-700 space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-white text-base flex items-center gap-2">
-                        <Share2 className="w-5 h-5 text-orange-500" />
-                        Strava
-                      </span>
-                      <span className={`text-sm font-bold ${stravaConnected ? 'text-emerald-400' : 'text-zinc-500'}`}>
-                        {!isOnline ? 'Needs internet' : stravaConnected ? 'Connected' : 'Not connected'}
-                      </span>
-                    </div>
-                    {stravaConnected ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          clearStravaTokens();
-                          setStravaConnected(false);
-                        }}
-                        className="w-full min-h-12 rounded-xl bg-zinc-900 border border-zinc-700 text-zinc-300 font-bold text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
-                      >
-                        Disconnect
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={!isOnline}
-                        onClick={() => {
-                          try {
-                            startStravaConnect();
-                          } catch (err) {
-                            alert(err instanceof Error ? err.message : 'Strava needs internet');
-                          }
-                        }}
-                        className="w-full min-h-12 rounded-xl bg-[#FC4C02] text-white font-bold text-sm disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FC4C02]"
-                      >
-                        Connect with Strava
-                      </button>
-                    )}
-                    <p className="text-sm text-zinc-400">
-                      Needs internet and Strava API setup for connect.
-                    </p>
-                  </section>
-
-                  {/* FTP */}
-                  <section className="bg-zinc-800/80 p-4 rounded-xl border border-zinc-700 space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-white text-base flex items-center gap-2">
-                        <Zap className="w-5 h-5 text-amber-400" />
-                        FTP
-                      </span>
-                      <span className="font-digital text-lg font-bold text-blue-400">{ftp} W</span>
-                    </div>
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="range"
-                        min="100"
-                        max="450"
-                        step="5"
-                        value={ftp}
-                        onChange={e => handleSaveFtp(parseInt(e.target.value, 10))}
-                        className="w-full accent-blue-500 cursor-pointer h-3 bg-zinc-800 rounded-lg"
-                        aria-label="FTP watts"
-                      />
-                      <input
-                        type="number"
-                        min="80"
-                        max="600"
-                        value={ftp}
-                        onChange={e => handleSaveFtp(parseInt(e.target.value, 10))}
-                        className="w-20 min-h-11 bg-zinc-900 border border-zinc-700 rounded-xl px-2 font-digital font-bold text-center text-white text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                      />
-                    </div>
-                    <p className="text-sm text-zinc-400">
-                      60-minute sustainable power. Zones update below.
-                    </p>
-                  </section>
-
-                  {/* HR Anchors */}
-                  <section className="bg-zinc-800/80 p-4 rounded-xl border border-zinc-700 space-y-3">
-                    <span className="font-bold text-white text-base flex items-center gap-2">
-                      <Heart className="w-5 h-5 text-red-400" />
-                      Heart rate zones
-                    </span>
-                    <div className="grid grid-cols-2 gap-3">
-                      <label className="space-y-1.5">
-                        <span className="text-sm text-zinc-400">Max HR</span>
-                        <input
-                          type="number"
-                          min="120"
-                          max="230"
-                          value={maxHeartRate}
-                          onChange={e => handleSaveMaxHr(parseInt(e.target.value, 10) || 190)}
-                          className="w-full min-h-11 bg-zinc-900 border border-zinc-700 rounded-xl px-3 font-digital font-bold text-center text-white text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
-                        />
-                      </label>
-                      <label className="space-y-1.5">
-                        <span className="text-sm text-zinc-400">Resting HR</span>
-                        <input
-                          type="number"
-                          min="30"
-                          max="100"
-                          value={restingHeartRate}
-                          onChange={e => handleSaveRestingHr(parseInt(e.target.value, 10) || 60)}
-                          className="w-full min-h-11 bg-zinc-900 border border-zinc-700 rounded-xl px-3 font-digital font-bold text-center text-white text-base focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
-                        />
-                      </label>
-                    </div>
-                  </section>
-
-                  {/* Power zones */}
-                  <section className="space-y-2">
-                    <h4 className="font-bold text-sm text-zinc-400">
-                      Power zones ({ftp}W FTP)
-                    </h4>
-                    <div className="space-y-2">
-                      {POWER_ZONES_CONFIG.map(z => {
-                        const minW = Math.round((z.minPct / 100) * ftp);
-                        const maxW = z.maxPct === 999 ? '∞' : `${Math.round((z.maxPct / 100) * ftp)}W`;
-                        const isCurrent = metrics.powerZone === z.zone;
-
-                        return (
-                          <div
-                            key={z.zone}
-                            className={`p-3 rounded-xl border flex items-center justify-between transition-colors ${
-                              isCurrent
-                                ? 'bg-zinc-800 border-white ring-1 ring-white/50'
-                                : 'bg-zinc-800/60 border-zinc-700'
-                            }`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <span
-                                className="w-3 h-3 rounded-full shrink-0"
-                                style={{ backgroundColor: z.color }}
-                              />
-                              <div>
-                                <div className="font-bold text-zinc-200 text-sm">
-                                  Z{z.zone} {z.name}
-                                </div>
-                                <div className="text-xs text-zinc-400">
-                                  {z.minPct}% - {z.maxPct === 999 ? '150%+' : `${z.maxPct}%`}
-                                </div>
-                              </div>
-                            </div>
-                            <div className="font-digital font-bold text-right text-sm">
-                              <span>{minW} - {maxW}</span>
-                              {isCurrent && (
-                                <span className="block text-xs text-emerald-400 uppercase font-sports">Active</span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-
-                  {/* HR zones table */}
-                  <section className="space-y-2">
-                    <h4 className="font-bold text-sm text-zinc-400">
-                      Heart rate zones (HRR)
-                    </h4>
-                    <div className="space-y-2">
-                      {HR_ZONES_CONFIG.map(z => {
-                        const hrr = Math.max(1, maxHeartRate - restingHeartRate);
-                        const minBpm = Math.round(restingHeartRate + (z.minPct / 100) * hrr);
-                        const maxBpm = Math.round(restingHeartRate + (z.maxPct / 100) * hrr);
-                        const isCurrent = metrics.hrZone === z.zone;
-                        return (
-                          <div
-                            key={z.zone}
-                            className={`p-3 rounded-xl border flex items-center justify-between ${
-                              isCurrent
-                                ? 'bg-zinc-800 border-white ring-1 ring-white/50'
-                                : 'bg-zinc-800/60 border-zinc-700'
-                            }`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <span
-                                className="w-3 h-3 rounded-full shrink-0"
-                                style={{ backgroundColor: z.color }}
-                              />
-                              <div>
-                                <div className="font-bold text-zinc-200 text-sm">Z{z.zone} {z.name}</div>
-                                <div className="text-xs text-zinc-400">
-                                  {z.minPct}% – {z.maxPct}% HRR
-                                </div>
-                              </div>
-                            </div>
-                            <div className="font-digital font-bold text-right text-sm">
-                              {minBpm} – {maxBpm}
-                              {isCurrent && (
-                                <span className="block text-xs text-emerald-400 uppercase font-sports">Active</span>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-                </div>
-              )}
-            </div>
-
-            {/* Sticky footer — destructive, away from primary mid-list CTAs */}
-            <div className="shrink-0 px-4 pt-3 pb-4 border-t border-zinc-800">
-              <button
-                type="button"
-                onClick={handleResetRide}
-                className="w-full min-h-12 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-red-400 border border-zinc-700 text-sm font-sports font-semibold transition-colors flex items-center justify-center gap-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
-              >
-                <RotateCcw className="w-5 h-5" />
-                <span>Reset ride (save to history)</span>
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+      <MenuSheet
+        open={isMenuDrawerOpen}
+        onOpenChange={setIsMenuDrawerOpen}
+        activeRoute={activeRoute}
+        routes={routes}
+        selectedRouteId={selectedRouteId}
+        rideHistory={rideHistory}
+        activeSession={activeSession}
+        isPaused={isPaused}
+        ridingTime={ridingTime}
+        saddleTime={saddleTime}
+        timeElapsed={timeElapsed}
+        distanceTraveled={distanceTraveled}
+        gpsStatus={gpsStatus}
+        currentCoords={currentCoords}
+        autoCenter={autoCenter}
+        invertHeading={invertHeading}
+        autoLapDistance={autoLapDistance}
+        batterySaver={batterySaver}
+        ftp={ftp}
+        maxHeartRate={maxHeartRate}
+        restingHeartRate={restingHeartRate}
+        metrics={metrics}
+        historyExportNotice={historyExportNotice}
+        historyMapRideId={historyMapRideId}
+        isOnline={isOnline}
+        stravaConnected={stravaConnected}
+        offlineMapAvailable={offlineMapAvailable}
+        onActivateRoute={activateRouteAsCurrentRide}
+        onClearRoute={handleClearRoute}
+        onOpenRouteBuilder={() => setIsRouteBuilderOpen(true)}
+        onUseSavedRoute={handleUseSavedRoute}
+        onDeleteSavedRoute={handleDeleteSavedRoute}
+        onLocateMe={handleLocateMe}
+        onOpenSensors={() => setIsSensorModalOpen(true)}
+        onOpenClimbModal={() => setIsClimbModalOpen(true)}
+        onFileUpload={handleFileUpload}
+        onToggleAutoCenter={handleToggleAutoCenter}
+        onToggleInvertHeading={handleToggleInvertHeading}
+        onSetAutoLapDistance={handleSetAutoLapDistance}
+        onStopActivity={handleStopActivity}
+        onClearAllHistory={handleClearAllHistory}
+        onDeleteHistoryItem={handleDeleteHistoryItem}
+        onSetHistoryMapRideId={setHistoryMapRideId}
+        onSetHistoryExportNotice={setHistoryExportNotice}
+        onSaveFtp={handleSaveFtp}
+        onSaveMaxHr={handleSaveMaxHr}
+        onSaveRestingHr={handleSaveRestingHr}
+        onToggleBatterySaver={handleToggleBatterySaver}
+        onOpenDownloadMaps={() => setIsDownloadMapsOpen(true)}
+        onOpenMapsStorage={() => setIsMapsStorageOpen(true)}
+        onResetRide={handleResetRide}
+        onStravaConnectedChange={setStravaConnected}
+      />
 
       {/* Sensor Pairing, Manual Climb, Ride Summary & Start Activity Modals (Portaled to body at z-[99999]) */}
       {typeof document !== 'undefined' && createPortal(
