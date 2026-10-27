@@ -7,6 +7,8 @@ import { haversineDistanceMeters } from './gpsService';
 export const PRIMARY_BRANCH_ID = 'primary';
 export const OFF_ROUTE_THRESHOLD_M = 40;
 export const OFF_ROUTE_STREAK_NEEDED = 3;
+/** Reject snap backtracks larger than this while on-route (meters). */
+export const MONOTONIC_BACKTRACK_ALLOW_M = 30;
 
 export interface PolylineProjection {
   distAlongRoute: number;
@@ -17,6 +19,8 @@ export interface PolylineProjection {
 export interface BranchTracker {
   branchId: string;
   offStreak: number;
+  /** Last accepted on-route distance along the active branch (monotonic clamp). */
+  lastDistAlongRoute?: number;
 }
 
 export interface ActiveBranchResult {
@@ -163,11 +167,22 @@ export function selectActiveRouteBranch(
   // Stay on chosen if still vaguely near; otherwise report off-route
   const offRoute = chosen.projection.crossTrackMeters > OFF_ROUTE_THRESHOLD_M;
 
+  let distAlongRoute = chosen.projection.distAlongRoute;
+  if (switched || tracker.branchId !== chosen.id) {
+    tracker.lastDistAlongRoute = distAlongRoute;
+  } else if (!offRoute) {
+    const prev = tracker.lastDistAlongRoute;
+    if (prev != null && distAlongRoute < prev - MONOTONIC_BACKTRACK_ALLOW_M) {
+      distAlongRoute = prev;
+    }
+    tracker.lastDistAlongRoute = distAlongRoute;
+  }
+
   return {
     branchId: chosen.id,
     points: chosen.points,
     turns: chosen.turns,
-    distAlongRoute: chosen.projection.distAlongRoute,
+    distAlongRoute,
     crossTrackMeters: chosen.projection.crossTrackMeters,
     offRoute,
     switched

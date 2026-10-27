@@ -225,27 +225,83 @@ export async function fetchOsrmBikeRoute(waypoints: LatLng[]): Promise<OsrmRoute
   return multi?.primary ?? null;
 }
 
+const ELEV_FETCH_RETRIES = 2;
+const ELEV_RETRY_DELAY_MS = 400;
+
+async function fetchElevationBatch(batch: LatLng[]): Promise<number[] | null> {
+  const lats = batch.map(c => c.lat.toFixed(5)).join(',');
+  const lngs = batch.map(c => c.lng.toFixed(5)).join(',');
+  const url = `https://api.open-meteo.com/v1/elevation?latitude=${lats}&longitude=${lngs}`;
+
+  for (let attempt = 0; attempt <= ELEV_FETCH_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        if (attempt < ELEV_FETCH_RETRIES) {
+          await new Promise(r => setTimeout(r, ELEV_RETRY_DELAY_MS * (attempt + 1)));
+          continue;
+        }
+        return null;
+      }
+      const data = await res.json();
+      const elevs: number[] = data.elevation || [];
+      if (!Array.isArray(elevs) || elevs.length === 0) {
+        if (attempt < ELEV_FETCH_RETRIES) {
+          await new Promise(r => setTimeout(r, ELEV_RETRY_DELAY_MS * (attempt + 1)));
+          continue;
+        }
+        return null;
+      }
+      return batch.map((_, j) => (typeof elevs[j] === 'number' ? elevs[j] : 0));
+    } catch {
+      if (attempt < ELEV_FETCH_RETRIES) {
+        await new Promise(r => setTimeout(r, ELEV_RETRY_DELAY_MS * (attempt + 1)));
+        continue;
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+/** True when elevation profile looks usable (not an all-zero API failure). */
+export function elevationProfileLooksValid(elevations: number[], minPoints = 10): boolean {
+  if (elevations.length < minPoints) return elevations.some(e => Number.isFinite(e) && e !== 0);
+  let nonZero = 0;
+  for (const e of elevations) {
+    if (Number.isFinite(e) && Math.abs(e) > 0.01) nonZero++;
+  }
+  // At least ~5% of samples must be non-zero (coastal flats can be near 0, but not all).
+  return nonZero >= Math.max(3, Math.floor(elevations.length * 0.05));
+}
+
 export async function fetchElevations(coords: LatLng[]): Promise<number[]> {
   if (coords.length === 0) return [];
   const elevations: number[] = new Array(coords.length).fill(0);
+  let failedBatches = 0;
+  let totalBatches = 0;
 
   for (let i = 0; i < coords.length; i += ELEV_BATCH) {
+    totalBatches++;
     const batch = coords.slice(i, i + ELEV_BATCH);
-    const lats = batch.map(c => c.lat.toFixed(5)).join(',');
-    const lngs = batch.map(c => c.lng.toFixed(5)).join(',');
-    const url = `https://api.open-meteo.com/v1/elevation?latitude=${lats}&longitude=${lngs}`;
-
-    try {
-      const res = await fetch(url);
-      if (!res.ok) continue;
-      const data = await res.json();
-      const elevs: number[] = data.elevation || [];
-      for (let j = 0; j < batch.length; j++) {
-        elevations[i + j] = typeof elevs[j] === 'number' ? elevs[j] : 0;
-      }
-    } catch {
-      // leave zeros for this batch
+    const batchElevs = await fetchElevationBatch(batch);
+    if (!batchElevs) {
+      failedBatches++;
+      continue;
     }
+    for (let j = 0; j < batch.length; j++) {
+      elevations[i + j] = batchElevs[j] ?? 0;
+    }
+  }
+
+  if (failedBatches === totalBatches && totalBatches > 0) {
+    throw new Error('Could not fetch elevations. Check your connection and try again.');
+  }
+
+  if (coords.length >= 10 && !elevationProfileLooksValid(elevations)) {
+    throw new Error(
+      'Elevation data came back empty. Check your connection and try again — climbs need a real elevation profile.'
+    );
   }
 
   return elevations;
@@ -423,7 +479,14 @@ function isDisplayableTurn(turn: RouteTurn): boolean {
   return true;
 }
 
-/** Live next-turn cue from OSRM steps + distance along route */
+/** Advance to the next cue once the rider is this far past the maneuver point. */
+export const MANEUVER_PASSED_EPS_M = 10;
+
+/**
+ * Live next-turn cue from OSRM steps + distance along route.
+ * Cues the upcoming maneuver by distFromRouteStart (not the whole OSRM step length),
+ * so instructions advance when the rider completes the turn.
+ */
 export function getNextTurn(
   turns: RouteTurn[] | undefined,
   distanceTraveled: number
@@ -434,17 +497,10 @@ export function getNextTurn(
   const list = actionable.length ? actionable : turns;
 
   for (const turn of list) {
-    const stepEnd = turn.distFromRouteStart + turn.distanceMeters;
-    if (distanceTraveled < stepEnd - 1) {
-      // Distance until this step's maneuver point (start of step)
-      const metersToManeuver = Math.max(0, Math.round(turn.distFromRouteStart - distanceTraveled));
-      // If already past maneuver into the step, show remaining distance to next maneuver start
-      const inStep = distanceTraveled >= turn.distFromRouteStart;
+    if (distanceTraveled < turn.distFromRouteStart + MANEUVER_PASSED_EPS_M) {
       return {
         turn,
-        metersToManeuver: inStep
-          ? Math.max(0, Math.round(turn.distFromRouteStart + turn.distanceMeters - distanceTraveled))
-          : metersToManeuver
+        metersToManeuver: Math.max(0, Math.round(turn.distFromRouteStart - distanceTraveled))
       };
     }
   }

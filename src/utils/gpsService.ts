@@ -355,13 +355,24 @@ class GpsService {
       return;
     }
 
+    const deviceSpeedKmh =
+      coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0
+        ? coords.speed * 3.6
+        : null;
+
     const maxAcc = this.hasGoodLock ? TRACKING_MAX_ACC_M : WARMUP_MAX_ACC_M;
     if (acc > maxAcc) {
-      const heading = this.resolveHeading(coords, 0, 0, lat, lng);
-      let speedKmh = 0;
-      if (coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0) {
-        speedKmh = coords.speed * 3.6;
+      let speedKmh = deviceSpeedKmh ?? 0;
+      // HUD speed from haversine even on weak fixes (odometer stays 0 via deltaDist).
+      if (deviceSpeedKmh === null && this.prevFix) {
+        const dtSeconds = Math.max(0.2, (now - this.prevFix.timestamp) / 1000);
+        const rawDist = haversineDistanceMeters(this.prevFix.lat, this.prevFix.lng, lat, lng);
+        const impliedKmh = (rawDist / dtSeconds) * 3.6;
+        if (impliedKmh <= MAX_JUMP_KMH && rawDist > 0.5) {
+          speedKmh = impliedKmh;
+        }
       }
+      const heading = this.resolveHeading(coords, speedKmh, 0, lat, lng);
       this.onFixCb?.(
         {
           lat,
@@ -394,18 +405,20 @@ class GpsService {
         return;
       }
 
+      // Odometer: noise gate only (keep distance from GPS jitter).
       if (rawDist > Math.max(1.5, acc * 0.15)) {
         deltaDist = rawDist;
         this.accumulatedDistMeters += deltaDist;
       }
 
-      if (coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0) {
-        speedKmh = coords.speed * 3.6;
-      } else if (deltaDist > 0 && dtSeconds > 0) {
-        speedKmh = (deltaDist / dtSeconds) * 3.6;
+      // HUD speed: prefer device speed; else derive from raw haversine even below odometer gate.
+      if (deviceSpeedKmh !== null) {
+        speedKmh = deviceSpeedKmh;
+      } else if (rawDist > 0.5 && dtSeconds > 0) {
+        speedKmh = impliedKmh;
       }
-    } else if (coords.speed !== null && !isNaN(coords.speed) && coords.speed >= 0) {
-      speedKmh = coords.speed * 3.6;
+    } else if (deviceSpeedKmh !== null) {
+      speedKmh = deviceSpeedKmh;
     }
 
     const heading = this.resolveHeading(coords, speedKmh, deltaDist, lat, lng);

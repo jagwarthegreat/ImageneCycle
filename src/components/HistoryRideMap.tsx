@@ -1,7 +1,8 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { BreadcrumbPoint } from '../types/cycling';
+import { MapLoadingOverlay } from './MapLoadingOverlay';
 
 interface HistoryRideMapProps {
   breadcrumbs: BreadcrumbPoint[];
@@ -15,6 +16,7 @@ export const HistoryRideMap: React.FC<HistoryRideMapProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -25,7 +27,12 @@ export const HistoryRideMap: React.FC<HistoryRideMapProps> = ({
     }
 
     const pts = breadcrumbs.filter(b => Number.isFinite(b.lat) && Number.isFinite(b.lng));
-    if (pts.length < 2) return;
+    if (pts.length < 2) {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
 
     const map = L.map(containerRef.current, {
       zoomControl: false,
@@ -60,9 +67,17 @@ export const HistoryRideMap: React.FC<HistoryRideMapProps> = ({
     }).addTo(map);
 
     map.fitBounds(line.getBounds(), { padding: [16, 16], maxZoom: 16 });
-    setTimeout(() => map.invalidateSize(), 50);
+    const readyTimer = window.setTimeout(() => {
+      try {
+        map.invalidateSize();
+      } catch {
+        /* ignore */
+      }
+      if (mapRef.current === map) setLoading(false);
+    }, 50);
 
     return () => {
+      clearTimeout(readyTimer);
       map.remove();
       mapRef.current = null;
     };
@@ -78,9 +93,11 @@ export const HistoryRideMap: React.FC<HistoryRideMapProps> = ({
 
   return (
     <div
-      ref={containerRef}
-      className={`rounded-lg overflow-hidden border border-zinc-700 ${className}`}
+      className={`relative rounded-lg overflow-hidden border border-zinc-700 ${className}`}
       style={{ minHeight: 140 }}
-    />
+    >
+      <div ref={containerRef} className="w-full h-full absolute inset-0" />
+      <MapLoadingOverlay visible={loading} label="Loading map…" />
+    </div>
   );
 };

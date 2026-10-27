@@ -1,5 +1,19 @@
 apply plugin: 'com.android.application'
 
+def versionPropsFile = rootProject.file('version.properties')
+def versionProps = new Properties()
+if (versionPropsFile.exists()) {
+    versionPropsFile.withInputStream { versionProps.load(it) }
+}
+def appVersionCode = (versionProps['VERSION_CODE'] ?: '11').toString().toInteger()
+def appVersionName = (versionProps['VERSION_NAME'] ?: '2.0.1').toString()
+
+def debugKeystorePropsFile = rootProject.file('keystore/debug.properties')
+def debugKeystoreProps = new Properties()
+if (debugKeystorePropsFile.exists()) {
+    debugKeystorePropsFile.withInputStream { debugKeystoreProps.load(it) }
+}
+
 android {
     namespace = "com.imagenecycle.app"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +21,8 @@ android {
         applicationId "com.imagenecycle.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 9
-        versionName "1.9"
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters 'arm64-v8a'
@@ -19,7 +33,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        debug {
+            if (debugKeystorePropsFile.exists()) {
+                def storeName = debugKeystoreProps['storeFile'] ?: 'imagenecycle-debug.jks'
+                storeFile rootProject.file("keystore/${storeName}")
+                storePassword debugKeystoreProps['storePassword']
+                keyAlias debugKeystoreProps['keyAlias']
+                keyPassword debugKeystoreProps['keyPassword']
+            }
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
         release {
             minifyEnabled true
             shrinkResources true

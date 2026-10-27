@@ -3,7 +3,15 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { RoutePoint, ClimbSegment, BreadcrumbPoint } from '../types/cycling';
 import { createCachedTileLayer } from '../utils/tileCache';
-import { resolveActiveBasemap, resolveActiveContour, clearAllPmtilesCaches } from '../utils/mapPacks';
+import {
+  resolveActiveBasemap,
+  resolveActiveContour,
+  clearAllPmtilesCaches,
+  isMapPacksInstalledFlag,
+  loadMapCatalog,
+  pointInBBox,
+  PMTILES_HEADER_TIMEOUT_MS
+} from '../utils/mapPacks';
 import { createContourOverlayLayer } from '../utils/contourOverlay';
 import {
   createOfflineBasemapLayer,
@@ -11,8 +19,10 @@ import {
   saveMapDetailsPref
 } from '../utils/offlineMapStyle';
 import { getClimbCategoryColor } from '../utils/climbProEngine';
+import { MapLoadingOverlay } from './MapLoadingOverlay';
 import { Layers, Map as MapIcon, MapPin } from 'lucide-react';
 
+const ATTACH_TIMEOUT_MS = PMTILES_HEADER_TIMEOUT_MS + 5000;
 
 function attachWorldOverview(map: L.Map, isDarkMode: boolean): L.Layer {
   // World overview — not a country offline pack (needs network). No country roads from app bundle.
@@ -27,6 +37,39 @@ function attachWorldOverview(map: L.Map, isDarkMode: boolean): L.Layer {
   return layer;
 }
 
+function isDeviceOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
+async function coveringPackName(lat: number, lng: number): Promise<string | null> {
+  try {
+    const packs = await loadMapCatalog();
+    const hit = packs.find(p => pointInBBox(lat, lng, p.bbox));
+    return hit?.name || null;
+  } catch {
+    return null;
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      v => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      err => {
+        clearTimeout(t);
+        reject(err);
+      }
+    );
+  });
+}
+
+/**
+ * Flag-first: check localStorage map_packs=installed, then open PMTiles for GPS bbox.
+ */
 async function attachBasemap(
   map: L.Map,
   isDarkMode: boolean,
@@ -40,50 +83,92 @@ async function attachBasemap(
   packName?: string;
   error?: string;
 }> {
-  const active = await resolveActiveBasemap(lat || 14.5995, lng || 120.9842);
-  if (active?.pmtiles) {
-    try {
-      const layer = createOfflineBasemapLayer({
-        pmtiles: active.pmtiles,
-        isDarkMode,
-        details
-      });
-      layer.addTo(map);
-      layer.bringToBack?.();
+  const safeLat = lat || 14.5995;
+  const safeLng = lng || 120.9842;
+  const offline = isDeviceOffline();
 
-      let contour: L.Layer | null = null;
-      try {
-        const topo = await resolveActiveContour(lat || 14.5995, lng || 120.9842);
-        if (topo?.pmtiles) {
-          contour = createContourOverlayLayer({
-            pmtiles: topo.pmtiles,
-            isDarkMode
-          });
-          contour.addTo(map);
-          // Keep contours above basemap, below route polylines
-          if ('bringToBack' in contour && typeof contour.bringToBack === 'function') {
-            // sit just above basemap
-            (layer as L.GridLayer).bringToBack?.();
-          }
-        }
-      } catch (err) {
-        console.warn('Contour overlay skipped:', err);
-      }
-
-      return { layer, contour, offline: true, packName: active.packName };
-    } catch (err) {
-      console.warn('Offline PMTiles failed, falling back to world overview:', err);
+  try {
+    // 1) Fast gate — no zip install flag → skip OPFS open
+    if (!isMapPacksInstalledFlag()) {
       const layer = attachWorldOverview(map, isDarkMode);
       return {
         layer,
         contour: null,
         offline: false,
-        error: 'Offline map invalid — using world overview'
+        error: offline ? 'Install maps for offline' : undefined
       };
     }
-  }
 
-  return { layer: attachWorldOverview(map, isDarkMode), contour: null, offline: false };
+    // 2) Flag set → resolve covering pack + paint
+    const active = await resolveActiveBasemap(safeLat, safeLng);
+    if (active?.pmtiles) {
+      try {
+        const layer = createOfflineBasemapLayer({
+          pmtiles: active.pmtiles,
+          isDarkMode,
+          details
+        });
+        layer.addTo(map);
+        layer.bringToBack?.();
+
+        let contour: L.Layer | null = null;
+        try {
+          const topo = await resolveActiveContour(safeLat, safeLng);
+          if (topo?.pmtiles) {
+            contour = createContourOverlayLayer({
+              pmtiles: topo.pmtiles,
+              isDarkMode
+            });
+            contour.addTo(map);
+            (layer as L.GridLayer).bringToBack?.();
+          }
+        } catch (err) {
+          console.warn('Contour overlay skipped:', err);
+        }
+
+        return { layer, contour, offline: true, packName: active.packName };
+      } catch (err) {
+        console.warn('Offline PMTiles layer failed:', err);
+        const name = active.packName || (await coveringPackName(safeLat, safeLng)) || 'Country';
+        const layer = attachWorldOverview(map, isDarkMode);
+        return {
+          layer,
+          contour: null,
+          offline: false,
+          error: `${name} pack unreadable — use Repair`
+        };
+      }
+    }
+
+    // Flag true but no openable covering pack
+    const name = await coveringPackName(safeLat, safeLng);
+    const layer = attachWorldOverview(map, isDarkMode);
+    return {
+      layer,
+      contour: null,
+      offline: false,
+      error: name
+        ? `${name} pack unreadable — use Repair`
+        : offline
+          ? 'Install maps for offline'
+          : 'No offline pack for this location'
+    };
+  } catch (err) {
+    console.warn('Basemap attach failed:', err);
+    const layer = attachWorldOverview(map, isDarkMode);
+    const timedOut = err instanceof Error && /timed out/i.test(err.message);
+    const name = await coveringPackName(safeLat, safeLng);
+    return {
+      layer,
+      contour: null,
+      offline: false,
+      error: timedOut
+        ? `Offline map timed out — Repair ${name || 'pack'}`
+        : offline
+          ? 'Install maps for offline'
+          : 'Map catalog failed — using world overview'
+    };
+  }
 }
 
 interface GpsMapViewProps {
@@ -148,6 +233,8 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   const [offlineMapReady, setOfflineMapReady] = useState<boolean | null>(null);
   const [activePackName, setActivePackName] = useState<string | null>(null);
   const [basemapError, setBasemapError] = useState<string | null>(null);
+  const [basemapLoading, setBasemapLoading] = useState(false);
+  const [basemapLoadingLabel, setBasemapLoadingLabel] = useState('Loading map…');
   const [mapDetails, setMapDetails] = useState(() => loadMapDetailsPref());
   const [resumeToken, setResumeToken] = useState(0);
   const hasCenteredInitiallyRef = useRef<boolean>(false);
@@ -410,7 +497,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
   }, []);
 
   // Swap day/night / pack basemap (PMTiles flavor or raster URL)
-  // Only re-attach when dark mode, map token, details, or region genuinely changes — NOT on every raw coordinate tick!
+  // Flag-first attach; commit lastBasemapParamsRef only after settle so hangs can retry.
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (!map) return;
@@ -429,45 +516,128 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
       Math.abs(prev.lng - lng) > 0.5;
 
     if (!needsUpdate) return;
-    lastBasemapParamsRef.current = {
-      isDark: isDarkMode,
-      token: basemapToken,
-      resume: resumeToken,
-      lat,
-      lng,
-      details: mapDetails
-    };
 
     let cancelled = false;
-    void attachBasemap(map, isDarkMode, lat, lng, mapDetails).then(
-      ({ layer, contour, offline, packName, error }) => {
-        if (cancelled || mapInstanceRef.current !== map) {
+    let settled = false;
+
+    const commitParams = () => {
+      lastBasemapParamsRef.current = {
+        isDark: isDarkMode,
+        token: basemapToken,
+        resume: resumeToken,
+        lat,
+        lng,
+        details: mapDetails
+      };
+    };
+
+    const applyBasemapResult = (
+      layer: L.Layer,
+      contour: L.Layer | null | undefined,
+      offline: boolean,
+      packName?: string,
+      error?: string
+    ) => {
+      if (cancelled || mapInstanceRef.current !== map) {
+        try {
           map.removeLayer(layer);
           if (contour) map.removeLayer(contour);
-          return;
-        }
-        if (tileLayerRef.current) {
-          map.removeLayer(tileLayerRef.current);
-        }
-        if (contourLayerRef.current) {
-          map.removeLayer(contourLayerRef.current);
-        }
-        tileLayerRef.current = layer;
-        contourLayerRef.current = contour || null;
-        setOfflineMapReady(offline);
-        setActivePackName(packName || null);
-        setBasemapError(error || null);
-        try {
-          map.invalidateSize();
         } catch {
           /* ignore */
         }
+        return;
       }
-    );
+      if (tileLayerRef.current) {
+        map.removeLayer(tileLayerRef.current);
+      }
+      if (contourLayerRef.current) {
+        map.removeLayer(contourLayerRef.current);
+      }
+      tileLayerRef.current = layer;
+      contourLayerRef.current = contour || null;
+      setOfflineMapReady(offline);
+      setActivePackName(packName || null);
+      setBasemapError(error || null);
+      setBasemapLoading(false);
+      settled = true;
+      commitParams();
+      try {
+        map.invalidateSize();
+      } catch {
+        /* ignore */
+      }
+    };
+
+    // Explicit loading state (chip + overlay) — never silent blank
+    const loadingLabel = isMapPacksInstalledFlag()
+      ? 'Loading offline map…'
+      : 'Loading map…';
+    setBasemapLoadingLabel(loadingLabel);
+    setBasemapLoading(true);
+    setBasemapError(null);
+    setOfflineMapReady(null);
+    setActivePackName(null);
+
+    void withTimeout(
+      attachBasemap(map, isDarkMode, lat, lng, mapDetails),
+      ATTACH_TIMEOUT_MS,
+      'Basemap attach'
+    )
+      .then(({ layer, contour, offline, packName, error }) => {
+        applyBasemapResult(layer, contour, offline, packName, error);
+      })
+      .catch(err => {
+        console.warn('Basemap promise rejected:', err);
+        if (cancelled || mapInstanceRef.current !== map) return;
+        clearAllPmtilesCaches();
+        const timedOut = err instanceof Error && /timed out/i.test(err.message);
+        try {
+          const layer = attachWorldOverview(map, isDarkMode);
+          applyBasemapResult(
+            layer,
+            null,
+            false,
+            undefined,
+            timedOut
+              ? 'Offline map timed out — Repair pack'
+              : isDeviceOffline()
+                ? 'Install maps for offline'
+                : 'Map failed to load'
+          );
+        } catch (fallbackErr) {
+          console.warn('World overview fallback failed:', fallbackErr);
+          setOfflineMapReady(false);
+          setActivePackName(null);
+          setBasemapLoading(false);
+          setBasemapError(
+            timedOut ? 'Offline map timed out — Repair pack' : 'Map failed to load'
+          );
+          settled = true;
+          commitParams();
+          try {
+            map.invalidateSize();
+          } catch {
+            /* ignore */
+          }
+        }
+      });
+
     return () => {
       cancelled = true;
+      // If attach never settled, clear params so the next effect can retry
+      if (!settled) {
+        lastBasemapParamsRef.current = null;
+      }
     };
-  }, [isDarkMode, basemapToken, resumeToken, mapDetails, currentPoint.lat, currentPoint.lng]);
+  }, [
+    isDarkMode,
+    basemapToken,
+    resumeToken,
+    mapDetails,
+    mapEpoch,
+    currentPoint.lat,
+    currentPoint.lng
+  ]);
 
   // Helper to render start/finish markers and navigation chevrons
   const updateEndpointsAndChevrons = (map: L.Map, latLngs: [number, number][]) => {
@@ -825,7 +995,7 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
             {routeName || (currentPoint.lat ? `${currentPoint.lat.toFixed(4)}°, ${currentPoint.lng.toFixed(4)}°` : 'Current Location')}
           </span>
         </div>
-        {(basemapError || offlineMapReady !== null) && (
+        {(basemapLoading || basemapError || offlineMapReady !== null) && (
           <div
             className={`shrink-0 w-auto max-w-[50%] inline-flex rounded-md shadow-sm border ${
               basemapError
@@ -837,14 +1007,16 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
           >
             <div
               className={`whitespace-nowrap px-1.5 py-0.5 font-sports font-semibold leading-none truncate ${
-                basemapError
+                basemapError || basemapLoading
                   ? 'text-[9px]'
                   : offlineMapReady
                   ? 'text-[8px] font-bold uppercase tracking-wider'
                   : 'text-[8px]'
               }`}
             >
-              {basemapError
+              {basemapLoading
+                ? basemapLoadingLabel
+                : basemapError
                 ? basemapError
                 : offlineMapReady
                 ? `${activePackName || 'Offline'} map`
@@ -853,6 +1025,8 @@ export const GpsMapView: React.FC<GpsMapViewProps> = ({
           </div>
         )}
       </div>
+
+      <MapLoadingOverlay visible={basemapLoading} label={basemapLoadingLabel} />
 
       {/* Floating Map Controls: Details, Heading mode, Locate/Fit, Zoom */}
       <div className="absolute bottom-2 right-2 flex flex-col gap-1.5 z-[400] items-end">

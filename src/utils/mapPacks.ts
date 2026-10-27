@@ -88,6 +88,65 @@ const IDB_NAME = 'magene-map-packs-meta';
 const IDB_STORE = 'layers';
 const IDB_VERSION = 2;
 const PMTILES_MIN_BYTES = 1024;
+/** localStorage gate: set on successful zip Map install; checked on load/render. */
+export const MAP_PACKS_LS_KEY = 'map_packs';
+export const MAP_PACKS_LS_VALUE = 'installed';
+/** Max wait for PMTiles getHeader on large OPFS files (Android WebView). */
+export const PMTILES_HEADER_TIMEOUT_MS = 20000;
+
+export function isMapPacksInstalledFlag(): boolean {
+  if (typeof localStorage === 'undefined') return false;
+  try {
+    return localStorage.getItem(MAP_PACKS_LS_KEY) === MAP_PACKS_LS_VALUE;
+  } catch {
+    return false;
+  }
+}
+
+export function markMapPacksInstalled(): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(MAP_PACKS_LS_KEY, MAP_PACKS_LS_VALUE);
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+export function clearMapPacksInstalledFlag(): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.removeItem(MAP_PACKS_LS_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function refreshMapPacksInstalledFlag(): Promise<void> {
+  const packs = await loadMapCatalog();
+  for (const p of packs) {
+    if (await isLayerInstalled(p, 'map')) {
+      markMapPacksInstalled();
+      return;
+    }
+  }
+  clearMapPacksInstalledFlag();
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      v => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      err => {
+        clearTimeout(t);
+        reject(err);
+      }
+    );
+  });
+}
 
 let catalogCache: MapPackCatalogEntry[] | null = null;
 /** Cached PMTiles readers (FileSource over OPFS File — works offline). */
@@ -273,7 +332,11 @@ export function isGuruProprietaryBlob(blob: Blob, magic?: Uint8Array): boolean {
   return false;
 }
 
-export async function validatePackBlob(layer: MapLayerKind, blob: Blob): Promise<void> {
+export async function validatePackBlob(
+  layer: MapLayerKind,
+  blob: Blob,
+  opts?: { expectedBytes?: number; openHeader?: boolean }
+): Promise<void> {
   if (!blob || blob.size <= 0) throw new Error('Empty download.');
 
   const head = await readMagic(blob, 16);
@@ -283,6 +346,22 @@ export async function validatePackBlob(layer: MapLayerKind, blob: Blob): Promise
 
   if (layer === 'map') {
     await assertPmtilesBlob(blob, 'PMTiles map file');
+    const expected = opts?.expectedBytes;
+    if (expected && expected > PMTILES_MIN_BYTES && blob.size < expected * 0.9) {
+      throw new Error(
+        `Map pack looks truncated (${formatBytes(blob.size)} vs expected ~${formatBytes(expected)}). Reinstall from zip.`
+      );
+    }
+    if (opts?.openHeader !== false) {
+      try {
+        const file = asFile(blob, 'validate.map.pmtiles');
+        const pmtiles = new PMTiles(new FileSource(file));
+        await withTimeout(pmtiles.getHeader(), PMTILES_HEADER_TIMEOUT_MS, 'PMTiles getHeader');
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Map pack could not be opened (${msg}). Use Repair / reinstall.`);
+      }
+    }
     return;
   }
 
@@ -301,12 +380,17 @@ export function parseTopoManifest(blob: Blob): Promise<TopoManifest> {
   return blob.text().then(text => JSON.parse(text.trim()) as TopoManifest);
 }
 
-async function isValidLocalLayer(fileName: string, layer: MapLayerKind): Promise<boolean> {
+async function isValidLocalLayer(
+  fileName: string,
+  layer: MapLayerKind,
+  expectedBytes?: number
+): Promise<boolean> {
   if (isGuruProprietaryFileName(fileName)) return false;
   const blob = await readPackBlob(fileName);
   if (!blob || blob.size <= 0) return false;
   try {
-    await validatePackBlob(layer, blob);
+    // Fast UI check: magic + size only (getHeader is expensive on ~761MB OPFS).
+    await validatePackBlob(layer, blob, { expectedBytes, openHeader: false });
     return true;
   } catch {
     return false;
@@ -363,12 +447,19 @@ async function metaDelete(key: string): Promise<void> {
 
 export async function loadMapCatalog(force = false): Promise<MapPackCatalogEntry[]> {
   if (!force && catalogCache) return catalogCache;
-  const res = await fetch(catalogUrl(), { cache: 'no-cache' });
-  if (!res.ok) throw new Error('Failed to load map catalog');
-  const data = await res.json();
-  const packs: MapPackCatalogEntry[] = Array.isArray(data.packs) ? data.packs : [];
-  catalogCache = packs.map(rewriteCatalogPack);
-  return catalogCache;
+  try {
+    const res = await fetch(catalogUrl(), { cache: force ? 'no-cache' : 'default' });
+    if (!res.ok) throw new Error(`Failed to load map catalog (${res.status})`);
+    const data = await res.json();
+    const packs: MapPackCatalogEntry[] = Array.isArray(data.packs) ? data.packs : [];
+    catalogCache = packs.map(rewriteCatalogPack);
+    return catalogCache;
+  } catch (err) {
+    console.warn('Map catalog fetch failed:', err);
+    // Keep last good in-memory catalog so installed packs can still resolve offline.
+    if (catalogCache) return catalogCache;
+    return [];
+  }
 }
 
 export function pointInBBox(lat: number, lng: number, bbox: MapPackBBox): boolean {
@@ -405,13 +496,14 @@ export async function isLayerInstalled(pack: MapPackCatalogEntry, layer: MapLaye
   const spec = pack.layers[layer];
   if (!spec || spec.infoOnly) return false;
 
+  const expectedBytes = spec.bytes;
   const fileName = layerFileName(pack, layer);
-  if (await isValidLocalLayer(fileName, layer)) return true;
+  if (await isValidLocalLayer(fileName, layer, expectedBytes)) return true;
 
   const key = cacheKey(pack.id, layer);
   const meta = (await metaGetAll()).find(m => m.cacheKey === key && m.installed);
   if (!meta) return false;
-  return isValidLocalLayer(meta.fileName || fileName, layer);
+  return isValidLocalLayer(meta.fileName || fileName, layer, expectedBytes);
 }
 
 export async function getInstallSnapshot(): Promise<Record<string, Partial<Record<MapLayerKind, boolean>>>> {
@@ -448,7 +540,7 @@ export async function resolveLayerPmtiles(pack: MapPackCatalogEntry): Promise<PM
   if (cached) return cached;
 
   const fileName = layerFileName(pack, 'map');
-  if (!(await isValidLocalLayer(fileName, 'map'))) return null;
+  if (!(await isValidLocalLayer(fileName, 'map', spec.bytes))) return null;
 
   const blob = await readPackBlob(fileName);
   if (!blob) return null;
@@ -456,7 +548,7 @@ export async function resolveLayerPmtiles(pack: MapPackCatalogEntry): Promise<PM
   try {
     const file = asFile(blob, fileName);
     const pmtiles = new PMTiles(new FileSource(file));
-    await pmtiles.getHeader(); // prove archive opens
+    await withTimeout(pmtiles.getHeader(), PMTILES_HEADER_TIMEOUT_MS, 'PMTiles getHeader');
     pmtilesByKey.set(key, pmtiles);
     return pmtiles;
   } catch (err) {
@@ -499,7 +591,7 @@ async function openLocalPmtiles(fileName: string, cacheId: string): Promise<PMTi
   try {
     const file = asFile(blob, fileName);
     const pmtiles = new PMTiles(new FileSource(file));
-    await pmtiles.getHeader();
+    await withTimeout(pmtiles.getHeader(), PMTILES_HEADER_TIMEOUT_MS, 'PMTiles getHeader');
     pmtilesByKey.set(cacheId, pmtiles);
     return pmtiles;
   } catch (err) {
@@ -654,7 +746,10 @@ export async function installMapLayerFromZip(
     // Re-validate installed bytes against layer rules
     const installedBlob = await readPackBlob(fileName);
     if (!installedBlob) throw new Error(`Failed to write ${fileName}`);
-    await validatePackBlob(layer, installedBlob);
+    await validatePackBlob(layer, installedBlob, {
+      expectedBytes: spec.bytes,
+      openHeader: layer === 'map'
+    });
 
     if (layer === 'topo') {
       clearPmtilesCache(`magene-map-${pack.id}-contour`);
@@ -670,6 +765,10 @@ export async function installMapLayerFromZip(
       cacheKey: key,
       fileName
     });
+
+    if (layer === 'map') {
+      markMapPacksInstalled();
+    }
   } finally {
     abortControllers.delete(key);
   }
@@ -735,7 +834,10 @@ export async function installPackFromZip(
         missing.push(layer);
         continue;
       }
-      await validatePackBlob(layer, installedBlob);
+      await validatePackBlob(layer, installedBlob, {
+        expectedBytes: spec.bytes,
+        openHeader: layer === 'map'
+      });
 
       let totalBytes = installedBlob.size;
       if (layer === 'topo') {
@@ -757,6 +859,10 @@ export async function installPackFromZip(
         fileName
       });
       installed.push(layer);
+    }
+
+    if (installed.includes('map')) {
+      markMapPacksInstalled();
     }
 
     return { installed, missing };
@@ -796,6 +902,9 @@ export async function deleteMapLayer(pack: MapPackCatalogEntry, layer: MapLayerK
   }
   await metaDelete(key);
   clearPmtilesCache(key);
+  if (layer === 'map') {
+    await refreshMapPacksInstalledFlag();
+  }
 }
 
 export function mntBadges(installed: Partial<Record<MapLayerKind, boolean>>): string {

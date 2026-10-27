@@ -57,9 +57,15 @@ export function runRouteEncodeValidation(): void {
   assert(atStart!.turn.maneuverType === 'turn', `expected turn, got ${atStart!.turn.maneuverType}`);
   assert(atStart!.metersToManeuver === 50, `meters to left turn should be 50, got ${atStart!.metersToManeuver}`);
 
-  const mid = getNextTurn(turns, 60);
-  assert(!!mid && mid.turn.maneuverType === 'turn', 'still on left turn step');
-  assert(mid!.metersToManeuver === 190, `remaining in step ~190, got ${mid!.metersToManeuver}`);
+  // Just past maneuver but within epsilon — still cue the turn at 0 m
+  const atManeuver = getNextTurn(turns, 55);
+  assert(!!atManeuver && atManeuver.turn.maneuverType === 'turn', 'still on left turn until epsilon');
+  assert(atManeuver!.metersToManeuver === 0, `at/after maneuver should be 0 m, got ${atManeuver!.metersToManeuver}`);
+
+  // Past maneuver + epsilon — advance to arrive
+  const mid = getNextTurn(turns, 65);
+  assert(!!mid && mid.turn.maneuverType === 'arrive', 'advance to arrive after left turn');
+  assert(mid!.metersToManeuver === 185, `meters to arrive ~185, got ${mid!.metersToManeuver}`);
 
   const nearEnd = getNextTurn(turns, 251);
   assert(!!nearEnd && nearEnd.turn.maneuverType === 'arrive', 'arrive cue');

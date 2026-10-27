@@ -748,20 +748,48 @@ export function MenuSheet({
                                   } catch (err) {
                                     onSetHistoryExportNotice(err instanceof Error ? err.message : 'JSON export failed');
                                   }
-                                  setTimeout(() => onSetHistoryExportNotice(null), 4000);
+                                  setTimeout(() => onSetHistoryExportNotice(null), 5000);
                                 }}
                                 className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-xl border border-zinc-700 bg-zinc-900 font-sports text-xs font-bold text-zinc-200 transition-colors hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400"
-                                title="Export JSON"
+                                title="Local backup only — Strava rejects JSON. Use FIT or GPX for Strava."
                               >
-                                <Share2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
-                                <span>JSON</span>
+                                <Share2 className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                                <span>Backup</span>
                               </button>
 
                               <button
                                 type="button"
-                                onClick={() => openStravaUpload()}
+                                onClick={async () => {
+                                  try {
+                                    const result = await exportRideToFit({
+                                      routeName: ride.routeName,
+                                      startedAt: ride.startedAt || ride.timestamp,
+                                      timeElapsed: ride.timeElapsed,
+                                      ridingTimeSeconds: ride.ridingTimeSeconds || ride.timeElapsed,
+                                      saddleTimeSeconds: ride.saddleTimeSeconds || ride.timeElapsed,
+                                      distanceMeters: ride.distanceMeters,
+                                      totalAscentMeters: ride.totalAscentMeters,
+                                      avgSpeedKmh: ride.avgSpeedKmh,
+                                      maxSpeedKmh: ride.maxSpeedKmh,
+                                      calories: ride.calories,
+                                      avgPowerWatts: ride.avgPowerWatts,
+                                      avgCadenceRpm: ride.avgCadenceRpm,
+                                      avgHeartRateBpm: ride.avgHeartRateBpm,
+                                      breadcrumbs: ride.breadcrumbs || []
+                                    });
+                                    onSetHistoryExportNotice(
+                                      `${formatExportNotice(result, 'FIT')} — pick this .fit on Strava (not JSON)`
+                                    );
+                                    openStravaUpload();
+                                  } catch (err) {
+                                    onSetHistoryExportNotice(
+                                      err instanceof Error ? err.message : 'FIT export for Strava failed'
+                                    );
+                                  }
+                                  setTimeout(() => onSetHistoryExportNotice(null), 6000);
+                                }}
                                 className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-xl border border-[#FC4C02]/40 bg-[#FC4C02]/20 font-sports text-xs font-bold text-[#FC4C02] transition-colors hover:bg-[#FC4C02]/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FC4C02]"
-                                title="Open Strava upload"
+                                title="Save .FIT then open Strava upload (JSON will fail on Strava)"
                               >
                                 <span>Strava</span>
                                 <ExternalLink className="h-3.5 w-3.5 shrink-0" />

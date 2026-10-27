@@ -387,17 +387,21 @@ export const RideSummaryModal: React.FC<RideSummaryModalProps> = ({
                   <span className="truncate">.GPX</span>
                 </button>
 
-                {/* JSON Telemetry Export Button */}
+                {/* JSON backup — not Strava-compatible */}
                 <button
                   type="button"
                   onClick={handleExportJson}
                   className="py-2 px-2 rounded-lg bg-zinc-800 hover:bg-zinc-750 active:bg-zinc-850 text-zinc-200 border border-zinc-700 hover:border-zinc-600 font-sports font-bold text-[11px] flex items-center justify-center gap-1 transition-all"
-                  title="Download complete telemetry and GPS coordinates as JSON"
+                  title="Local backup/analytics only — Strava will reject JSON. Use FIT or GPX for Strava."
                 >
                   <FileCode className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-                  <span className="truncate">.JSON</span>
+                  <span className="truncate">Backup</span>
                 </button>
               </div>
+              <p className="text-[10px] text-zinc-500 font-sports leading-tight">
+                Strava accepts <span className="text-emerald-400 font-bold">.FIT</span> or{' '}
+                <span className="text-orange-400 font-bold">.GPX</span> only — not JSON.
+              </p>
 
               {/* Strava Direct API Upload Button */}
               <div className="flex items-center gap-1.5 pt-1">
@@ -431,10 +435,21 @@ export const RideSummaryModal: React.FC<RideSummaryModalProps> = ({
               {/* Direct Strava Upload Web Link fallback */}
               <button
                 type="button"
-                onClick={openStravaUpload}
+                onClick={async () => {
+                  try {
+                    const result = await exportRideToFit(buildExportPayload());
+                    setExportNotice(
+                      `${formatExportNotice(result, 'FIT')} — select this .fit on Strava (not Backup/JSON)`
+                    );
+                  } catch (err) {
+                    setExportNotice(err instanceof Error ? err.message : 'FIT export failed');
+                  }
+                  openStravaUpload();
+                  setTimeout(() => setExportNotice(null), 6000);
+                }}
                 className="w-full py-1.5 px-2 rounded-lg bg-zinc-950 hover:bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-orange-400 text-[11px] font-sports font-semibold flex items-center justify-center gap-1 transition-colors"
               >
-                <span>Manual Upload at strava.com/upload</span>
+                <span>Manual upload (.FIT → strava.com/upload)</span>
                 <ExternalLink className="w-3 h-3 text-orange-500" />
               </button>
             </div>

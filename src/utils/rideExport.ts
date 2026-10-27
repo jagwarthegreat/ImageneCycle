@@ -654,12 +654,16 @@ export async function exportRideToGpx(ride: ExportableRideData): Promise<ExportS
 }
 
 /**
- * Exports and downloads full JSON telemetry including speed, distance, elevation, and breadcrumbs
+ * Exports full JSON telemetry for local backup / analytics.
+ * Not a Strava upload format — Strava only accepts FIT, GPX, or TCX.
  */
 export async function exportRideToJson(ride: ExportableRideData): Promise<ExportSaveResult> {
   const payload = {
     device: 'ImageneCycle Cycling Computer',
     version: '2.0',
+    /** Explicit: this file is not for Strava / Garmin Connect uploads */
+    stravaCompatible: false,
+    note: 'Backup/analytics only. Upload .fit or .gpx to Strava — not this JSON.',
     exportedAt: new Date().toISOString(),
     activity: {
       title: ride.routeName,
@@ -690,15 +694,21 @@ export async function exportRideToJson(ride: ExportableRideData): Promise<Export
     .replace(/[^a-z0-9_-]/g, '_')
     .replace(/_+/g, '_');
   const dateStr = new Date().toISOString().slice(0, 10);
-  const filename = `magene_c706_${cleanName}_${dateStr}.json`;
+  // Filename avoids implying Strava compatibility
+  const filename = `imagenecycle_backup_${cleanName}_${dateStr}.json`;
   return downloadFile(jsonStr, filename, 'application/json');
 }
 
 export function formatExportNotice(result: ExportSaveResult, label: string): string {
+  const isJson = /^json$/i.test(label.trim());
   if (result.native) {
-    return `${label} saved to Documents/${result.path}`;
+    return isJson
+      ? `JSON backup saved to Documents/${result.path} — not for Strava (use FIT or GPX)`
+      : `${label} saved to Documents/${result.path}`;
   }
-  return `${label} downloaded (${result.filename})`;
+  return isJson
+    ? `JSON backup downloaded (${result.filename}) — not for Strava (use FIT or GPX)`
+    : `${label} downloaded (${result.filename})`;
 }
 
 /**
@@ -722,14 +732,28 @@ export interface StravaUploadResult {
 export async function uploadToStrava(
   file: Blob | File,
   accessToken: string,
-  options?: { name?: string; description?: string; dataType?: 'fit' | 'gpx' }
+  options?: { name?: string; description?: string; dataType?: 'fit' | 'gpx' | 'tcx' }
 ): Promise<StravaUploadResult> {
   const token = accessToken ? accessToken.trim() : '';
   if (!token) {
     throw new Error('Strava access token is required');
   }
 
-  const dataType = options?.dataType || (file.type.includes('fit') ? 'fit' : 'fit');
+  const filenameHint =
+    file instanceof File && file.name ? file.name.toLowerCase() : '';
+  if (
+    filenameHint.endsWith('.json') ||
+    (typeof file.type === 'string' && file.type.includes('json'))
+  ) {
+    throw new Error(
+      'Strava does not accept JSON. Export/upload a .FIT or .GPX file instead.'
+    );
+  }
+
+  const dataType = options?.dataType || (file.type.includes('gpx') ? 'gpx' : 'fit');
+  if (dataType !== 'fit' && dataType !== 'gpx' && dataType !== 'tcx') {
+    throw new Error('Strava only accepts FIT, GPX, or TCX uploads.');
+  }
   const form = new FormData();
   const filename =
     file instanceof File && file.name

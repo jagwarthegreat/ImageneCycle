@@ -19,7 +19,11 @@
     "maps:guard": "node scripts/guard-no-bundled-pmtiles.mjs",
     "maps:zip": "node scripts/zip-country-map.mjs",
     "build:release": "npm run maps:guard && vite build",
-    "icons:gen": "node scripts/generate-app-icons.mjs"
+    "icons:gen": "node scripts/generate-app-icons.mjs",
+    "android:bump": "node scripts/android-bump-version.mjs",
+    "android:build:debug": "npm run android:bump && npm run build && npx cap sync android && npm run android:assemble:debug",
+    "android:assemble:debug": "node scripts/android-assemble-debug.mjs",
+    "android:install:debug": "node scripts/android-install-debug.mjs"
   },
   "dependencies": {
     "@capacitor-community/bluetooth-le": "^8.3.0",

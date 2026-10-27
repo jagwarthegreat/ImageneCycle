@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { LatLng } from '../utils/routeEncode';
@@ -6,6 +6,7 @@ import { RoutePoint } from '../types/cycling';
 import { resolveActiveBasemap, resolveActiveContour } from '../utils/mapPacks';
 import { createContourOverlayLayer } from '../utils/contourOverlay';
 import { createOfflineBasemapLayer, loadMapDetailsPref } from '../utils/offlineMapStyle';
+import { MapLoadingOverlay } from './MapLoadingOverlay';
 
 export type PinMode = 'start' | 'dest' | 'via';
 
@@ -52,6 +53,7 @@ export const RoutePickerMap: React.FC<RoutePickerMapProps> = ({
   const lineRef = useRef<L.Polyline | null>(null);
   const onClickRef = useRef(onMapClick);
   onClickRef.current = onMapClick;
+  const [basemapLoading, setBasemapLoading] = useState(true);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -64,45 +66,50 @@ export const RoutePickerMap: React.FC<RoutePickerMapProps> = ({
     });
 
     mapRef.current = map;
+    setBasemapLoading(true);
 
     map.on('click', (e: L.LeafletMouseEvent) => {
       onClickRef.current({ lat: e.latlng.lat, lng: e.latlng.lng });
     });
 
     void (async () => {
-      const lat = center.lat || 14.6;
-      const lng = center.lng || 121;
-      const active = await resolveActiveBasemap(lat, lng);
-      if (!mapRef.current) return;
-      if (active?.pmtiles) {
-        try {
-          const details = loadMapDetailsPref();
-          const layer = createOfflineBasemapLayer({
-            pmtiles: active.pmtiles,
-            isDarkMode: false,
-            details
-          });
-          layer.addTo(map);
+      try {
+        const lat = center.lat || 14.6;
+        const lng = center.lng || 121;
+        const active = await resolveActiveBasemap(lat, lng);
+        if (!mapRef.current) return;
+        if (active?.pmtiles) {
           try {
-            const topo = await resolveActiveContour(lat, lng);
-            if (topo?.pmtiles && mapRef.current) {
-              createContourOverlayLayer({
-                pmtiles: topo.pmtiles,
-                isDarkMode: false
-              }).addTo(map);
+            const details = loadMapDetailsPref();
+            const layer = createOfflineBasemapLayer({
+              pmtiles: active.pmtiles,
+              isDarkMode: false,
+              details
+            });
+            layer.addTo(map);
+            try {
+              const topo = await resolveActiveContour(lat, lng);
+              if (topo?.pmtiles && mapRef.current) {
+                createContourOverlayLayer({
+                  pmtiles: topo.pmtiles,
+                  isDarkMode: false
+                }).addTo(map);
+              }
+            } catch {
+              /* contours optional */
             }
+            return;
           } catch {
-            /* contours optional */
+            /* fall through to world overview */
           }
-          return;
-        } catch {
-          /* fall through to world overview */
         }
+        if (!mapRef.current) return;
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19
+        }).addTo(map);
+      } finally {
+        if (mapRef.current) setBasemapLoading(false);
       }
-      if (!mapRef.current) return;
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19
-      }).addTo(map);
     })();
 
     setTimeout(() => map.invalidateSize(), 100);
@@ -181,13 +188,13 @@ export const RoutePickerMap: React.FC<RoutePickerMapProps> = ({
     }
   }, [routePoints]);
 
-  // Cursor hint via CSS class on container
   return (
     <div className={`relative w-full h-full min-h-[220px] ${className}`}>
       <div ref={containerRef} className="w-full h-full rounded-lg overflow-hidden z-0" />
       <div className="absolute top-2 left-2 z-[500] px-2 py-1 rounded-md bg-zinc-900/85 text-[10px] font-sports font-bold text-white border border-zinc-700 pointer-events-none">
         Tap map to set {pinMode === 'start' ? 'START (A)' : pinMode === 'dest' ? 'DEST (B)' : 'VIA'}
       </div>
+      <MapLoadingOverlay visible={basemapLoading} label="Loading map…" />
     </div>
   );
 };

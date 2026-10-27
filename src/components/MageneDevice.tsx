@@ -92,6 +92,12 @@ interface MageneDeviceProps {
   onToggleInvertHeading?: () => void;
   /** Drive map HDG UP while a ride is recording */
   preferHeadingUp?: boolean;
+  /** Snapped nav progress for voice / ClimbPro (same source as TBT UI). */
+  onNavProgress?: (nav: {
+    distAlongRoute: number;
+    turns: RouteTurn[];
+    offRoute: boolean;
+  } | null) => void;
 }
 
 function formatClock24h(d: Date): string {
@@ -176,7 +182,8 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   onAutoCenterChange,
   invertHeading,
   onToggleInvertHeading,
-  preferHeadingUp = false
+  preferHeadingUp = false,
+  onNavProgress
 }) => {
   const [currentDate, setCurrentDate] = useState<Date>(() => new Date());
   useEffect(() => {
@@ -195,7 +202,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
   });
 
   useEffect(() => {
-    branchTrackerRef.current = { branchId: PRIMARY_BRANCH_ID, offStreak: 0 };
+    branchTrackerRef.current = { branchId: PRIMARY_BRANCH_ID, offStreak: 0, lastDistAlongRoute: undefined };
   }, [routePoints, routeAlternatives]);
 
   // Format time MM:SS or HH:MM:SS
@@ -231,6 +238,7 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
       (metrics.currentLat === 0 && metrics.currentLng === 0)
     ) {
       setNavBranch(null);
+      onNavProgress?.(null);
       return;
     }
     const result = selectActiveRouteBranch(
@@ -241,13 +249,25 @@ export const MageneDevice: React.FC<MageneDeviceProps> = ({
       branchTrackerRef.current
     );
     setNavBranch(result);
+    const turnsForNav =
+      result.branchId !== PRIMARY_BRANCH_ID
+        ? result.turns || []
+        : result.turns?.length
+          ? result.turns
+          : routeTurns;
+    onNavProgress?.({
+      distAlongRoute: result.distAlongRoute,
+      turns: turnsForNav,
+      offRoute: result.offRoute
+    });
   }, [
     hasActiveRoute,
     metrics.currentLat,
     metrics.currentLng,
     routePoints,
     routeTurns,
-    routeAlternatives
+    routeAlternatives,
+    onNavProgress
   ]);
 
   const navPoints = navBranch?.points?.length ? navBranch.points : routePoints;

@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   X,
   Navigation2,
-  Loader2,
   ArrowLeftRight,
   CornerUpLeft,
   CornerUpRight,
@@ -17,6 +16,7 @@ import {
 import { RouteData, RouteTurn } from '../types/cycling';
 import { evaluateRouteFromEndpoints, LatLng } from '../utils/routeEncode';
 import { RoutePickerMap, PinMode } from './RoutePickerMap';
+import { MapLoadingOverlay } from './MapLoadingOverlay';
 
 const MAX_VIAS = 8;
 
@@ -278,14 +278,7 @@ export const RouteBuilderModal: React.FC<RouteBuilderModalProps> = ({
             pinMode={pinMode}
             onMapClick={handleMapClick}
           />
-          {evaluating && (
-            <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-[600]">
-              <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-700 px-3 py-2 rounded-xl text-xs font-bold">
-                <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                Routing…
-              </div>
-            </div>
-          )}
+          <MapLoadingOverlay visible={evaluating} label="Routing…" />
         </div>
 
         {/* Waypoint list + summary + turns */}

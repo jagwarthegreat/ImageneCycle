@@ -47,8 +47,9 @@
   z-index: 20 !important;
 }
 
-.leaflet-pane {
-  z-index: 10 !important;
+/* Do not flatten all panes to the same z-index — breaks PMTiles canvas vs overlays. */
+.leaflet-map-pane {
+  z-index: 2;
 }
 
 .leaflet-control-attribution {

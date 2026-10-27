@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { RouteData, RoutePoint, ClimbSegment, RideMetrics, BleDeviceStatus, GpsStatus, RideHistoryItem, ActiveRideSession, AutoLapAlert, BreadcrumbPoint } from './types/cycling';
+import { RouteData, RoutePoint, ClimbSegment, RideMetrics, BleDeviceStatus, GpsStatus, RideHistoryItem, ActiveRideSession, AutoLapAlert, BreadcrumbPoint, RouteTurn } from './types/cycling';
 import { parseGpxRoute } from './data/routes';
 import { calculateClimbProLiveState } from './utils/climbProEngine';
 import { bleManager } from './utils/bleManager';
@@ -15,7 +15,11 @@ import { loadRideHistory, saveRideToHistory, deleteRideFromHistory, clearRideHis
 import { fetchLiveWeather, WeatherData } from './services/weatherService';
 import { captureStravaRedirectTokens, isStravaConnected } from './utils/stravaAuth';
 import { loadUserRoutes, loadUserRoutesAsync, saveUserRoute, deleteUserRoute } from './utils/routeLibrary';
-import { probeOfflineMapAvailable } from './utils/offlineMap';
+import {
+  probeOfflineMapAvailable,
+  reconcileMapPacksInstalledFlag,
+  isMapPacksInstalledFlag
+} from './utils/offlineMap';
 import { freeRideClimbRecorder } from './utils/freeRideClimbRecorder';
 import { getRouteElevation, correctEllipsoidalAltitude, fetchDemElevation } from './utils/elevationService';
 import { MageneDevice } from './components/MageneDevice';
@@ -341,6 +345,12 @@ export default function App() {
   const lastPromptDismissedAtRef = useRef<number>(0);
   const prevClimbInRef = useRef<boolean>(false);
   const lastAltRef = useRef<number | null>(null);
+  /** Same snapped corridor + distance as MageneDevice TBT UI (for voice). */
+  const navProgressRef = useRef<{
+    distAlongRoute: number;
+    turns: RouteTurn[];
+    offRoute: boolean;
+  } | null>(null);
   const selectedRouteIdRef = useRef<string | null>(selectedRouteId);
   selectedRouteIdRef.current = selectedRouteId;
   const distanceTraveledRef = useRef(distanceTraveled);
@@ -554,12 +564,20 @@ export default function App() {
     return () => clearInterval(interval);
   }, [currentCoords.lat, currentCoords.lng, isOnline]);
 
-  // Merge IndexedDB routes + probe shipped PH basemap
+  // Merge IndexedDB routes + reconcile map_packs localStorage flag → probe basemap
   useEffect(() => {
     void loadUserRoutesAsync().then(list => {
       if (list.length) setRoutes(list);
     });
-    void probeOfflineMapAvailable().then(setOfflineMapAvailable);
+    void (async () => {
+      const hasPacks = await reconcileMapPacksInstalledFlag();
+      setOfflineMapAvailable(hasPacks || isMapPacksInstalledFlag());
+      // Re-attach basemap after flag reconcile (covers refresh / already-installed OPFS)
+      if (hasPacks || isMapPacksInstalledFlag()) {
+        setBasemapToken(t => t + 1);
+      }
+      void probeOfflineMapAvailable(true).then(setOfflineMapAvailable);
+    })();
   }, []);
 
   // Subscribe to BLE + ANT+ hardware streams (exclusive per role in sensor modal)
@@ -709,6 +727,12 @@ export default function App() {
         // Weak / display-only: puck + HUD; thinned trail (no distance) for continuity
         if (fix.displayOnly) {
           if (fix.heading) setCurrentHeading(fix.heading);
+          if (!bleCscConnectedRef.current) {
+            setSpeed(fix.speedKmh);
+            if (isRecordingRef.current && !isPausedRef.current && fix.speedKmh > 0) {
+              setMaxSpeed(prev => Math.max(prev, fix.speedKmh));
+            }
+          }
           if (fix.altitude > 0) {
             let ele = fix.altitude;
             if (activeRoute && activeRoute.points?.length) {
@@ -716,6 +740,13 @@ export default function App() {
               if (rEle !== null) ele = rEle;
             }
             setCurrentElevation(Math.round(ele));
+          } else if (!selectedRouteIdRef.current && fix.lat && fix.lng) {
+            // 2D GPS: allow DEM for HUD even on weak fixes / while recording
+            void fetchDemElevation(fix.lat, fix.lng).then(demEle => {
+              if (demEle !== null && !selectedRouteIdRef.current) {
+                setCurrentElevation(Math.round(demEle));
+              }
+            });
           }
 
           const curSessionId = activeSessionRef.current?.id;
@@ -816,11 +847,36 @@ export default function App() {
           if (routeEle !== null) {
             nextEle = routeEle;
           }
-        } else if (fix.lat && fix.lng) {
-          // In Free Ride, check DEM cache/fetch for ground truth calibration
+        } else if (fix.lat && fix.lng && nextEle <= 0) {
+          // Free ride with 2D GPS: DEM for HUD + ascent while recording (prefer GPS/route when valid).
           void fetchDemElevation(fix.lat, fix.lng).then(demEle => {
-            if (demEle !== null && !selectedRouteIdRef.current && (!isRecordingRef.current || isPausedRef.current)) {
-              setCurrentElevation(Math.round(demEle));
+            if (demEle === null || selectedRouteIdRef.current) return;
+            const roundedDem = Math.round(demEle);
+            setCurrentElevation(roundedDem);
+            const sid = activeSessionRef.current?.id;
+            if (sessionBufferRef.current && sid && sessionBufferRef.current.id === sid) {
+              sessionBufferRef.current.currentElevation = roundedDem;
+            }
+            if (isRecordingRef.current && !isPausedRef.current && sid && gpsService.getTrackingSessionId() === sid) {
+              if (lastAltRef.current !== null && roundedDem > lastAltRef.current) {
+                const diff = roundedDem - lastAltRef.current;
+                if (diff >= 1) {
+                  setTotalAscent(prev => {
+                    const nextTotal = prev + diff;
+                    totalAscentRef.current = nextTotal;
+                    if (sessionBufferRef.current && sessionBufferRef.current.id === sid) {
+                      sessionBufferRef.current.totalAscentMeters = Math.max(
+                        sessionBufferRef.current.totalAscentMeters,
+                        nextTotal
+                      );
+                    }
+                    return nextTotal;
+                  });
+                }
+              }
+              lastAltRef.current = roundedDem;
+            } else {
+              lastAltRef.current = roundedDem;
             }
           });
         }
@@ -1066,7 +1122,14 @@ export default function App() {
     prevClimbInRef.current = climbState.isInClimb;
   }, [climbState.isInClimb]);
 
-  // Voice: upcoming climb + turn-by-turn distance cues (created routes)
+  const handleNavProgress = useCallback(
+    (nav: { distAlongRoute: number; turns: RouteTurn[]; offRoute: boolean } | null) => {
+      navProgressRef.current = nav;
+    },
+    []
+  );
+
+  // Voice: upcoming climb + turn-by-turn — use snapped nav distance/turns (same as TBT UI)
   useEffect(() => {
     if (!isRecording || isPaused || !activeRoute) return;
     const next = climbState.nextClimb || climbState.currentClimb;
@@ -1078,7 +1141,11 @@ export default function App() {
         isInClimb: climbState.isInClimb
       });
     }
-    const cue = getNextTurn(activeRoute.turns, distanceTraveled);
+    const nav = navProgressRef.current;
+    const turns = nav?.turns?.length ? nav.turns : activeRoute.turns;
+    const along =
+      nav != null && !nav.offRoute ? nav.distAlongRoute : distanceTraveled;
+    const cue = getNextTurn(turns, along);
     rideNarrator.tickTurn(cue);
   }, [
     isRecording,
@@ -1088,7 +1155,9 @@ export default function App() {
     climbState.currentClimb,
     climbState.distToNextClimb,
     climbState.isInClimb,
-    distanceTraveled
+    distanceTraveled,
+    currentCoords.lat,
+    currentCoords.lng
   ]);
 
   // Real-Time Power & HR Zone Calculation
@@ -1638,6 +1707,7 @@ export default function App() {
           autoCenter={autoCenter}
           onToggleAutoCenter={handleToggleAutoCenter}
           onAutoCenterChange={handleAutoCenterChange}
+          onNavProgress={handleNavProgress}
           invertHeading={invertHeading}
           onToggleInvertHeading={handleToggleInvertHeading}
           preferHeadingUp={false}
@@ -1760,7 +1830,11 @@ export default function App() {
             currentLat={currentCoords.lat}
             currentLng={currentCoords.lng}
             onPacksChanged={() => {
+              // Flag already set/cleared in mapPacks install/delete; re-probe + re-attach basemap
               setBasemapToken(t => t + 1);
+              void reconcileMapPacksInstalledFlag().then(has => {
+                setOfflineMapAvailable(has);
+              });
               void probeOfflineMapAvailable(true).then(setOfflineMapAvailable);
             }}
           />
